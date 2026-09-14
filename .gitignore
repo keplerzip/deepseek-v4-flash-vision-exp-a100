@@ -1,0 +1,31 @@
+# Operator settings and generated evidence
+deployment.env
+.env
+.env.*
+!.env.example
+*token*.txt
+*key*.pem
+runtime/
+validation/
+work/
+dist/
+__pycache__/
+*.pyc
+.venv/
+# External weights, images, dependencies and build products
+*.tar
+*.tar.gz
+*.tgz
+*.zip
+*.whl
+*.so
+*.a
+*.o
+*.bin
+*.safetensors
+*.pt
+*.pth
+*.log
+source/vllm-source/
+upgrade/upgrade-r33.sh
+upgrade/base64-r3.3.cmd

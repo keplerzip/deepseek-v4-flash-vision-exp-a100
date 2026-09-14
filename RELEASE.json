@@ -1,0 +1,46 @@
+{
+  "release": "R3.3",
+  "date": "2026-09-14",
+  "model": "DeepSeek-V4-Flash",
+  "single_served_model": true,
+  "authentication": "disabled",
+  "configuration": {
+    "decoding": "dspark",
+    "enforce_eager": false,
+    "gpu_memory_utilization": 0.92,
+    "model": "/model",
+    "served_model_name": "DeepSeek-V4-Flash",
+    "max_model_len": 262144,
+    "max_num_seqs": 32,
+    "tensor_parallel_size": 8,
+    "max_num_batched_tokens": 4096,
+    "kv_cache_dtype": "fp8",
+    "block_size": 256,
+    "limit_mm_per_prompt": {
+      "image": 999
+    },
+    "mm_processor_cache_gb": 0,
+    "enable_prefix_caching": true,
+    "disable_chunked_mm_input": true,
+    "speculative_config": {
+      "method": "dspark",
+      "num_speculative_tokens": 6,
+      "draft_sample_method": "greedy",
+      "max_model_len": 262144
+    },
+    "dtype": "bfloat16",
+    "mm_encoder_attn_backend": "TORCH_SDPA",
+    "prefix_caching_hash_algo": "sha256",
+    "release": "R3.3"
+  },
+  "baseline_release": "R3.2",
+  "runtime_kernel_changes": false,
+  "dependency_changes": false,
+  "renderer_sha256": "531b7a867bf2391d25be37c49ff34172b6186bd8f4b16f295e8f9532c1633d4a",
+  "reported_codex_newapi_http500": "UNRESOLVED; no fix claimed",
+  "target_gpu_inference_r33": "pending operator execution",
+  "all_999_images_tested": false,
+  "full_256k_times_32_tested": false,
+  "newapi_billing_ledger_tested": false,
+  "distribution": "source-only; no runtime image, model weights or compiled dependencies"
+}

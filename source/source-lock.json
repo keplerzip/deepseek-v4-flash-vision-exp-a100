@@ -1,0 +1,12 @@
+{
+  "release": "R3.3",
+  "base_repository": "https://github.com/haosdent/vllm.git",
+  "base_commit": "cf7898691b58820a8ba98e018f612d4a0c2f69f0",
+  "vision_upstream_commit": "1356635d837c4ef002ec98c1a0296e7ff60be3c1",
+  "patch": "r3-port-from-r2.3.patch",
+  "patch_sha256": "6215aefdca4c187a7e900cef0e07a1f83770734d250c32a84ca71de01cdc09f0",
+  "renderer_overlay": "deepseek_v4_renderer.py",
+  "renderer_sha256": "531b7a867bf2391d25be37c49ff34172b6186bd8f4b16f295e8f9532c1633d4a",
+  "reconstruction_checked": "Patch applies to frozen R2.3 source; all 39 patched files match frozen R3 snapshot. Renderer applied separately.",
+  "gpu_rebuild_validation": "not executed for this source publication"
+}

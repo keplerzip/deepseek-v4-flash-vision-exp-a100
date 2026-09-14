@@ -1,0 +1,5 @@
+# Checksummed deployment files must retain their original bytes on checkout.
+* -text
+# Patch context and the original third-party license are preserved verbatim.
+*.patch -whitespace
+source/model-metadata/LICENSE -whitespace

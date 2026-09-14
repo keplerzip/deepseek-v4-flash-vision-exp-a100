@@ -1,0 +1,17 @@
+# Merge into the client user's config; this file is not installed automatically.
+# Local service: no API key required.
+model = "DeepSeek-V4-Flash"
+model_provider = "r33_local"
+model_context_window = 262144
+model_auto_compact_token_limit = 229376
+model_supports_reasoning_summaries = false
+
+[features]
+enable_request_compression = false
+
+[model_providers.r33_local]
+name = "R3.3"
+base_url = "http://127.0.0.1:8005/v1"
+wire_api = "responses"
+requires_openai_auth = false
+supports_websockets = false

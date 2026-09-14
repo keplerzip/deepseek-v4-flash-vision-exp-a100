@@ -1,0 +1,14 @@
+{
+  "model": "DeepSeek-V4-Flash",
+  "env": {
+    "ANTHROPIC_BASE_URL": "http://127.0.0.1:8005",
+    "ANTHROPIC_MODEL": "DeepSeek-V4-Flash",
+    "ANTHROPIC_CUSTOM_MODEL_OPTION": "DeepSeek-V4-Flash",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL": "DeepSeek-V4-Flash",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL": "DeepSeek-V4-Flash",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "DeepSeek-V4-Flash",
+    "CLAUDE_CODE_SUBAGENT_MODEL": "DeepSeek-V4-Flash",
+    "CLAUDE_CODE_MAX_CONTEXT_TOKENS": "262144",
+    "CLAUDE_CODE_AUTO_COMPACT_WINDOW": "229376"
+  }
+}

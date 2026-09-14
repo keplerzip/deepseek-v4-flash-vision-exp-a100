@@ -1,0 +1,10 @@
+{
+  "release": "R3.3",
+  "revision": "20260914-r3.3-final-noauth",
+  "script_sha256": "50a7e24e7c6954764ecf18c1b49e4a06545a7036b5173b3403c858e05242f3a5",
+  "command_sha256": "5aa44608d71fdc7bd9dea055b2a067ffe17f151a980eee5596a645d1652af30c",
+  "command_bytes": 100394,
+  "image_transfer_required": false,
+  "new_image_build_required": false,
+  "api_authentication": "disabled"
+}
