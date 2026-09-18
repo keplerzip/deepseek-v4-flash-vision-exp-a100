@@ -1,0 +1,265 @@
+--- a/vllm/entrypoints/openai/responses/utils.py
++++ b/vllm/entrypoints/openai/responses/utils.py
+@@ -37,6 +37,7 @@
+ )
+ from vllm.entrypoints.openai.engine.protocol import FunctionCall, FunctionDefinition
+ from vllm.entrypoints.openai.responses.protocol import ResponseInputOutputItem
++from vllm.exceptions import VLLMValidationError
+ from vllm.logger import init_logger
+ from vllm.tool_parsers.utils import (
+     build_responses_tool_call_name_map,
+@@ -273,7 +274,7 @@
+     elif isinstance(item, ResponseReasoningItem):
+         reasoning = ""
+         if item.encrypted_content:
+-            raise ValueError("Encrypted content is not supported.")
++            raise VLLMValidationError("Encrypted content is not supported.", parameter="input")
+         elif item.content and len(item.content) >= 1:
+             reasoning = item.content[0].text
+         elif len(item.summary) >= 1:
+@@ -295,7 +296,9 @@
+             "reasoning": reasoning,
+         }
+     elif isinstance(item, ResponseOutputMessage):
+-        output_text = item.content[0].text
++        if any(not isinstance(part, ResponseOutputText) for part in item.content):
++            raise VLLMValidationError("Unsupported content in Responses output message", parameter="input")
++        output_text = "".join(part.text for part in item.content)
+         if prev_assistant_msg:
+             previous_content = prev_assistant_msg.get("content")
+             if previous_content is None:
+@@ -332,7 +335,10 @@
+                     prev_assistant_msg["content"] = text
+                     return None
+             return {"role": "assistant", "content": text}
+-    return item  # type: ignore[arg-type]
++    if isinstance(item, dict) and item.get("role") in ("user", "system", "developer", "assistant", "tool"):
++        return item  # type: ignore[return-value]
++    item_type = item.get("type") if isinstance(item, dict) else getattr(item, "type", None)
++    raise VLLMValidationError(f"Unsupported Responses input item type: {item_type}", parameter="input")
+ 
+ 
+ def extract_function_tool_names(tools: list[Tool]) -> frozenset[str]:
+--- a/vllm/models/deepseek_v4/nvidia/dspark.py
++++ b/vllm/models/deepseek_v4/nvidia/dspark.py
+@@ -29,7 +29,7 @@
+     fused_moe_make_expert_params_mapping,
+ )
+ from vllm.model_executor.layers.layernorm import RMSNorm
+-from vllm.model_executor.layers.linear import ReplicatedLinear
++from vllm.model_executor.layers.linear import MergedColumnParallelLinear, ReplicatedLinear
+ from vllm.model_executor.layers.logits_processor import LogitsProcessor
+ from vllm.model_executor.layers.vocab_parallel_embedding import (
+     ParallelLMHead,
+@@ -52,6 +52,21 @@
+ # MoE expert scale suffix differs by expert dtype (mirrors deepseek_v4 loaders):
+ # fp4 experts register ``.weight_scale``; block-fp8 experts ``.weight_scale_inv``.
+ _EXPERT_SCALE_RE = re.compile(r"\.experts\.\d+\.w[123]\.scale$")
++
++
++_CONTEXT_WKV_RE = re.compile(r"^mtp\.(\d+)\.attn\.wkv\.(.+)$")
++
++
++def _duplicate_context_wkv_weights(weights, num_layers):
++    """Feed the SAME checkpoint weights/scales to both quantized projections."""
++    for name, weight in weights:
++        yield name, weight
++        match = _CONTEXT_WKV_RE.fullmatch(name)
++        if match is None or int(match.group(1)) >= num_layers:
++            continue
++        duplicate = weight.detach()
++        duplicate.shard_id = int(match.group(1))
++        yield f"context_wkv_proj.{match.group(2)}", duplicate
+ 
+ 
+ class DSparkDeepseekV4Model(nn.Module):
+@@ -97,6 +112,13 @@
+             ]
+         )
+ 
++        self.context_wkv_proj = MergedColumnParallelLinear(
++            config.hidden_size, [config.head_dim] * self.num_dspark_layers,
++            bias=False, return_bias=False, quant_config=vllm_config.quant_config,
++            prefix=maybe_prefix(prefix, "context_wkv_proj"), disable_tp=True,
++        )
++        self._r34_context_validated = False
++
+         # Heads: final norm + hc_head, and the Markov head
+         # Loaded from the "final" MTP layer weights (mtp.*) in the target checkpoint
+         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+@@ -150,19 +172,46 @@
+         place draft layers in different groups). ``None`` (or a ``None`` entry)
+         runs the projection to reserve workspace but writes nothing (profiling).
+         """
+-        for i, layer in enumerate(self.layers):
++        if not self._r34_context_validated:
++            self._validate_context_projection(main_x)
++        all_kv = self.context_wkv_proj(main_x).view(
++            main_x.shape[0], self.num_dspark_layers, self.config.head_dim
++        )
++        for i, (layer, kv) in enumerate(zip(self.layers, all_kv.unbind(1), strict=True)):
+             slot_mapping = (
+                 None if context_slot_mappings is None else context_slot_mappings[i]
+             )
+             attn = layer.attn
+-            # Optimized DSV4 MLA path: wkv part of the fused wq_a|wkv projection
+-            # (q_lora part discarded), then RoPE/quant/insert via the fused op.
+-            qr_kv, _ = attn.fused_wqa_wkv(main_x)
+-            kv = qr_kv[..., attn.q_lora_rank :]
+             kv = attn.kv_norm(kv)
+             if slot_mapping is None:
+                 continue
+             _insert_context_kv(attn, kv, context_positions, slot_mapping)
++
++    @torch.inference_mode()
++    def _validate_context_projection(self, main_x: torch.Tensor) -> None:
++        """Once per rank, after quantization packing, before graph capture.
++
++        Nonzero probes validate the actual loaded FP8/Marlin weight and scale
++        layout against the original fused Q+KV path. Never silently fall back.
++        GEMM shape changes can change BF16 rounding; allow small numeric drift.
++        """
++        if torch.cuda.is_current_stream_capturing():
++            raise RuntimeError("R34 WKV validation must run before CUDA graph capture")
++        generator = torch.Generator(device=main_x.device).manual_seed(3406)
++        worst = 0.0
++        for count in (1, 8, 32):
++            probe = torch.randn((count, self.hidden_size), generator=generator,
++                                device=main_x.device, dtype=main_x.dtype)
++            actual = self.context_wkv_proj(probe).view(
++                count, self.num_dspark_layers, self.config.head_dim)
++            for i, layer in enumerate(self.layers):
++                original, _ = layer.attn.fused_wqa_wkv(probe)
++                expected = original[..., layer.attn.q_lora_rank:]
++                torch.testing.assert_close(actual[:, i], expected, rtol=0.02, atol=0.02)
++                worst = max(worst, float((actual[:, i].float() - expected.float()).abs().max()))
++        self._r34_context_validated = True
++        logger.info("R34_STACKED_WKV_CHECK=PASS tp_rank=%d max_abs_diff=%.6g",
++                    get_tensor_model_parallel_rank(), worst)
+ 
+     def forward(
+         self,
+@@ -412,6 +461,8 @@
+         head_start = n_local_head * tp_rank
+         head_end = n_local_head * (tp_rank + 1)
+ 
++        self.model._r34_context_validated = False
++        weights = _duplicate_context_wkv_weights(weights, len(self.model.layers))
+         for name, loaded_weight in weights:
+             mapped = self._remap_dspark_name(name)
+             if mapped is None:
+@@ -432,6 +483,12 @@
+                 loaded_weight = DeepseekV4Model._pad_shared_expert_weight(
+                     self.quant_config, name, loaded_weight
+                 )
++
++            if name.startswith("model.context_wkv_proj."):
++                param = params_dict[name]
++                param.weight_loader(param, loaded_weight, loaded_weight.shard_id)
++                loaded_params.add(name)
++                continue
+ 
+             # E8M0 expert scales: keep raw exponent bytes.
+             if ".experts." in name:
+@@ -498,6 +555,8 @@
+ 
+         Returns None for non-mtp weights (owned by the target model).
+         """
++        if name.startswith("context_wkv_proj."):
++            return f"model.{name}"
+         m = re.match(r"mtp\.(\d+)\.(.*)", name)
+         if m is None:
+             return None
+--- a/vllm/models/deepseek_v4/nvidia/model.py
++++ b/vllm/models/deepseek_v4/nvidia/model.py
+@@ -975,6 +975,7 @@
+         res_mix: torch.Tensor | None = None,
+         residual: torch.Tensor | None = None,
+         x_scales: torch.Tensor | None = None,
++        previous_aux: list[torch.Tensor] | None = None,
+     ) -> tuple[
+         torch.Tensor,
+         torch.Tensor,
+@@ -1047,6 +1048,11 @@
+                 x_scales=x_scales,
+             )
+ 
++        # R3.4: this is the reconstructed PREVIOUS layer residual.
++        # Capture before the FFN-side fused post/pre overwrites it.
++        if previous_aux is not None:
++            previous_aux.append(residual.mean(dim=1))
++
+         # attn_norm is fused into mhc_pre_tilelang / mhc_fused_post_pre above.
+         x = self.attn(positions, x, None)
+         x, x_scales = self._hoisted_all_reduce(x)
+@@ -1220,40 +1226,28 @@
+         # None on every bf16 path (all decode, and every flag-off run).
+         x_scales: torch.Tensor | None = None
+         aux_hidden_states: list[torch.Tensor] = []
+-        final_aux_recon: torch.Tensor | None = None  # avoid duplicate mhc_post call
++        # Aux layer ids are one-based; layer idx reconstructs layer idx-1.
+         for idx, layer in enumerate(
+             islice(self.layers, self.start_layer, self.end_layer),
+             start=self.start_layer,
+         ):
++            capture_previous = idx in self.aux_hidden_state_layers
+             hidden_states, residual, post_mix, res_mix, x_scales = layer(
+-                hidden_states,
+-                positions,
+-                input_ids,
+-                post_mix,
+-                res_mix,
+-                residual,
++                hidden_states, positions, input_ids, post_mix, res_mix, residual,
+                 x_scales,
+-            )
+-            if idx + 1 in self.aux_hidden_state_layers:
+-                # Reconstruct the aux hidden state for draft models
+-                aux_recon = mhc_post_tilelang(
+-                    hidden_states, residual, post_mix, res_mix, x_scales=x_scales
+-                )
+-                aux_hidden_states.append(aux_recon.mean(dim=1))
+-                final_aux_recon = aux_recon
++                previous_aux=aux_hidden_states if capture_previous else None,
++            )
+         if layer is not None:
+-            # Reuse if the last layer was captured as an aux hidden state
++            hidden_states = mhc_post_tilelang(
++                hidden_states, residual, post_mix, res_mix, x_scales=x_scales
++            )
+             if self.end_layer in self.aux_hidden_state_layers:
+-                hidden_states = final_aux_recon
+-            else:
+-                hidden_states = mhc_post_tilelang(
+-                    hidden_states, residual, post_mix, res_mix, x_scales=x_scales
+-                )
++                aux_hidden_states.append(hidden_states.mean(dim=1))
+ 
+         if not get_pp_group().is_last_rank:
+             return IntermediateTensors({"hidden_states": hidden_states})
+ 
+-        if self._mtp_hidden_buffer is not None:
++        if self._mtp_hidden_buffer is not None and not aux_hidden_states:
+             num_tokens = hidden_states.shape[0]
+             self._mtp_hidden_buffer[:num_tokens].copy_(hidden_states.flatten(1))
+ 
+--- a/vllm/v1/worker/gpu/model_runner.py
++++ b/vllm/v1/worker/gpu/model_runner.py
+@@ -669,7 +669,7 @@
+             # target returns a persistent buffer sized at max_num_batched_tokens;
+             # slice to the active token count that propose() expects.
+             spec_hidden_states = hidden_states
+-            if hasattr(self.model, "get_mtp_target_hidden_states"):
++            if not aux_hidden_states and hasattr(self.model, "get_mtp_target_hidden_states"):
+                 pre_hc_hidden_states = self.model.get_mtp_target_hidden_states()
+                 spec_hidden_states = pre_hc_hidden_states[: hidden_states.shape[0]]  # type: ignore[union-attr]
+             with use_workspace_lane(self._draft_workspace_lane):
+@@ -1600,7 +1600,7 @@
+             # target returns a persistent buffer sized at max_num_batched_tokens;
+             # slice to the active token count that propose() expects.
+             spec_hidden_states = hidden_states
+-            if hasattr(self.model, "get_mtp_target_hidden_states"):
++            if not aux_hidden_states and hasattr(self.model, "get_mtp_target_hidden_states"):
+                 pre_hc_hidden_states = self.model.get_mtp_target_hidden_states()
+                 spec_hidden_states = pre_hc_hidden_states[: hidden_states.shape[0]]  # type: ignore[union-attr]
+             with use_workspace_lane(self._draft_workspace_lane):

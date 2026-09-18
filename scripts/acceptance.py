@@ -330,7 +330,7 @@ def main():
     summary = {
         "status": "FAIL" if failed else "PASS",
         "model": MODEL,
-        "release": "R3.3",
+        "release": "R3.4",
         "failed": failed,
         "long_context_executed": a.long,
         "full_window_c32_executed": a.saturation,

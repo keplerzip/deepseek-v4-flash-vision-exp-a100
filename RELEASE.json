@@ -1,6 +1,7 @@
 {
-  "release": "R3.3",
-  "date": "2026-09-14",
+  "release": "R3.4",
+  "date": "2026-09-16",
+  "publication_date": "2026-09-18",
   "model": "DeepSeek-V4-Flash",
   "single_served_model": true,
   "authentication": "disabled",
@@ -31,16 +32,43 @@
     "dtype": "bfloat16",
     "mm_encoder_attn_backend": "TORCH_SDPA",
     "prefix_caching_hash_algo": "sha256",
-    "release": "R3.3"
+    "release": "R3.4"
   },
-  "baseline_release": "R3.2",
-  "runtime_kernel_changes": false,
+  "baseline_release": "R3.3",
+  "runtime_kernel_changes": true,
   "dependency_changes": false,
   "renderer_sha256": "531b7a867bf2391d25be37c49ff34172b6186bd8f4b16f295e8f9532c1633d4a",
   "reported_codex_newapi_http500": "UNRESOLVED; no fix claimed",
-  "target_gpu_inference_r33": "pending operator execution",
+  "target_gpu_inference_r34": "PASS; operator-reported R34_UPGRADE=PASS on 2026-09-16, confirmed effective on 2026-09-18",
+  "target_validation": {
+    "evidence": "Operator-provided terminal output; full target report is not archived in this source repository",
+    "hardware": "8 x NVIDIA A100 80GB",
+    "vision_gpu_tests_passed": 153,
+    "r34_aux_numeric_and_graph_tests_passed": 4,
+    "upgrade_result": "PASS",
+    "backend_image_cached_tokens_observed": 256,
+    "performance_baseline_release": "R3.1",
+    "performance_scope": "Same client and prompt, three complete 1024-output-token requests per kind; C1 only",
+    "text": {
+      "before_median_client_tps": 213.35869262695624,
+      "after_median_client_tps": 209.64615010255136,
+      "after_median_decode_tps": 211.2171925812337,
+      "client_tps_ratio": 0.9825995253406618
+    },
+    "image": {
+      "before_median_client_tps": 198.77345937947862,
+      "after_median_client_tps": 203.22219632855243,
+      "after_median_decode_tps": 208.61411135188465,
+      "client_tps_ratio": 1.0223809404080488
+    },
+    "regression_threshold": 0.8,
+    "conclusion": "Approximately unchanged single-request throughput; no statistically established speedup"
+  },
   "all_999_images_tested": false,
   "full_256k_times_32_tested": false,
   "newapi_billing_ledger_tested": false,
-  "distribution": "source-only; no runtime image, model weights or compiled dependencies"
+  "newapi_gateway_report_received": false,
+  "distribution": "small source overlay; reuse frozen R3-series image; no weights or runtime tar",
+  "public_distribution": "readable source only; encoded commands, upgrade payload and generated delivery metadata excluded",
+  "native_binary_changes": false
 }

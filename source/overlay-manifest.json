@@ -1,0 +1,7 @@
+{
+  "vllm/entrypoints/openai/responses/utils.py": "0637a18230f1bc5a39f36273d88481b5a95768d5d292728963d46e200006c89e",
+  "vllm/models/deepseek_v4/nvidia/dspark.py": "a80e089ea51d671230963e156514023785dae19ac773f68aebb6388fbfc5a784",
+  "vllm/models/deepseek_v4/nvidia/model.py": "0d26a47c78426792ec5a28f5aa6a3204d8247d552b36930957a96b29c4ea0891",
+  "vllm/renderers/deepseek_v4.py": "531b7a867bf2391d25be37c49ff34172b6186bd8f4b16f295e8f9532c1633d4a",
+  "vllm/v1/worker/gpu/model_runner.py": "83ee864ee41c7158916173cdd2da23d5288074d7e7fb93e0247c2b0cdd0b8771"
+}

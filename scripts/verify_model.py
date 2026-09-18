@@ -34,7 +34,7 @@ def verify(root, full_hash=False):
     expected = json.loads(ref.read_text())["weight_map"]
     if idx != expected:
         raise ValueError(
-            "权重索引与 R3.3 固定 Vision-Exp 版本不一致；请保留诊断结果核对，勿替换为文本模型"
+            "权重索引与 R3.4 固定 Vision-Exp 版本不一致；请保留诊断结果核对，勿替换为文本模型"
         )
     shards = sorted(set(idx.values()))
     total = 0

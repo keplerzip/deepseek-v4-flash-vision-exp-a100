@@ -8,7 +8,7 @@ import time
 import uuid
 import cache_probe as p
 
-DEST = Path('/results') / ('concurrency-r33-' + datetime.datetime.now().strftime('%Y%m%d-%H%M%S-%f') + '.jsonl')
+DEST = Path('/results') / ('concurrency-r34-' + datetime.datetime.now().strftime('%Y%m%d-%H%M%S-%f') + '.jsonl')
 PATHS = ['/v1/chat/completions', '/v1/responses', '/v1/messages']
 
 def make_case(round_id, n):
@@ -57,13 +57,13 @@ def main():
                 if p.KEY:
                     line = line.replace(p.KEY, '[REDACTED]')
                 f.write(line + '\n')
-        print(json.dumps({'id': 'r33-concurrency-32', 'round': i + 1, 'status': 'FAIL' if failed else 'PASS',
+        print(json.dumps({'id': 'r34-concurrency-32', 'round': i + 1, 'status': 'FAIL' if failed else 'PASS',
                           'passed': 32 - len(failed), 'failed': len(failed),
                           'mix': 'images-chat-json' if i < 5 else 'text-image-three-protocols-json-sse'}), flush=True)
         for r in failed:
             line = json.dumps(r, ensure_ascii=False)
             print(line.replace(p.KEY, '[REDACTED]') if p.KEY else line, flush=True)
-    print(json.dumps({'C32_R33': 'FAIL' if failures else 'PASS', 'requests': 320, 'failed': failures,
+    print(json.dumps({'C32_R34': 'FAIL' if failures else 'PASS', 'requests': 320, 'failed': failures,
                       'retries': 0, 'result_file': str(DEST), 'full_window_c32_executed': False}), flush=True)
     return bool(failures)
 

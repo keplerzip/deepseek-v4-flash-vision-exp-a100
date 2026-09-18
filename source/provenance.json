@@ -1,42 +1,14 @@
 {
-  "release": "R3.3",
-  "base_image": "dsv4-flash-a100:20260914-r3.2",
-  "runtime_change": "Release metadata only; engine files and model weights unchanged",
-  "previous_provenance": {
-    "release": "R3.2",
-    "model": "DeepSeek-V4-Flash",
-    "image": "dsv4-flash-a100:20260914-r3.2",
-    "parent_image": "dsv4-flash-a100:20260913-r3.1",
-    "parent_image_id": "sha256:272c73e1e38aa508b9424ff472b391eef41b28503f884c5659584c39362ae188",
-    "runtime_and_renderer_unchanged": true,
-    "previous_source_provenance": {
-      "release": "R3.1",
-      "date": "2026-09-13",
-      "model_name": "Deepseek-V4-Flash",
-      "model_aliases": [],
-      "model_source": "https://www.modelscope.cn/models/deepseek-ai/DeepSeek-V4-Flash-Vision-Exp/files",
-      "target_model_dir": "/ai/models/deepseek-v4-flash-vision-exp-modelscope",
-      "base_source_commit": "cf7898691b58820a8ba98e018f612d4a0c2f69f0",
-      "vision_upstream_commit": "1356635d837c4ef002ec98c1a0296e7ff60be3c1",
-      "base_image": "dsv4-vision-a100:20260910-r3-sm80-rc1",
-      "base_image_id": "sha256:64cc83da4129dbddb6d040ebc5a9a9038071257d82d62b831c3c782e1b097e49",
-      "release_image": "dsv4-flash-a100:20260913-r3.1",
-      "release_image_id": "sha256:272c73e1e38aa508b9424ff472b391eef41b28503f884c5659584c39362ae188",
-      "final_configuration": "config/service.json",
-      "full_image_included": true,
-      "weight_shards_included": false,
-      "host_driver_and_docker_installers_included": false,
-      "tokenizer_fix_baked_into_image": true,
-      "renderer_sha256": "531b7a867bf2391d25be37c49ff34172b6186bd8f4b16f295e8f9532c1633d4a",
-      "hotfixes": [
-        "Runner V2 for DSpark",
-        "Graph flag before imports",
-        "Responses image detail",
-        "Explicit tool JSON reply prompt",
-        "Real prefix cache usage",
-        "Shared tokenizer concurrency protection"
-      ],
-      "model_files_modified": false
-    }
-  }
+  "release": "R3.4",
+  "baseline_image_id": "sha256:3a93108b2925da6d5498f2a7f7c442159b7a14fc0d6e64da3bbcc5b0a3a338e9",
+  "base_vllm": "0.1.dev43+gcf7898691.d20260830",
+  "model_weights_changed": false,
+  "native_binaries_changed": false,
+  "upstream_prs": [
+    55575,
+    54674,
+    55974
+  ],
+  "patch": "r34-runtime.patch",
+  "target_gpu_validation": "PASS; operator-reported GPU checks and R34_UPGRADE=PASS on 2026-09-16; see VALIDATION.md"
 }

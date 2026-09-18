@@ -22,7 +22,7 @@ New API 需启用相应 Responses/Messages 路由，避免多拼接 /v1。模型
 升级默认只自动验收后端。需要在当前 New API 实测时，将模型 token 写入一个权限600的文件，再执行：
 
 ```bash
-R33_NEWAPI_URL=http://127.0.0.1:3000 R33_NEWAPI_TOKEN_FILE=/absolute/path/newapi-token bash newapi_test.sh
+R34_NEWAPI_URL=http://127.0.0.1:3000 R34_NEWAPI_TOKEN_FILE=/absolute/path/newapi-token bash newapi_test.sh
 ```
 
 测试会发出真实请求并产生该网关的正常用量，校验三协议冷热缓存 JSON/SSE、多图和工具往返。结果记录返回 request id、真实 usage；与 New API 消费日志的缓存读取量核对才能判断账单链路。测试不读取或更改网关数据库/管理员配置。

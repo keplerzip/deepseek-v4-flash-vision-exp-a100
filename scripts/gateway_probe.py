@@ -10,7 +10,7 @@ import client_protocol_test as c
 import multi_image_probe as m
 
 def main():
-    base = os.environ['R33_NEWAPI_URL'].rstrip('/')
+    base = os.environ['R34_NEWAPI_URL'].rstrip('/')
     if base.endswith('/v1'): base = base[:-3]
     url = urllib.parse.urlsplit(base)
     assert url.scheme in ('http','https') and url.netloc and not url.username and not url.password and not url.query and not url.fragment, 'Invalid New API root URL'

@@ -1,0 +1,5 @@
+vllm/entrypoints/openai/responses/utils.py
+vllm/models/deepseek_v4/nvidia/dspark.py
+vllm/models/deepseek_v4/nvidia/model.py
+vllm/renderers/deepseek_v4.py
+vllm/v1/worker/gpu/model_runner.py

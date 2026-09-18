@@ -2,12 +2,18 @@
 import base64
 import datetime
 import json
+import os
 from pathlib import Path
 import statistics
 import time
 from cache_probe import request, NAMES
 
-out = Path('/results') / ('performance-r33-' + datetime.datetime.now().strftime('%Y%m%d-%H%M%S-%f') + '.jsonl')
+if os.environ.get('R34_BENCH_DISCOVER') == '1':
+    models=request('/v1/models')['data']
+    assert len(models)==1 and models[0]['max_model_len']==262144
+    NAMES[:]=[models[0]['id']]
+
+out = Path('/results') / ('performance-r34-' + datetime.datetime.now().strftime('%Y%m%d-%H%M%S-%f') + '.jsonl')
 prompt = '请详细介绍数据库事务、隔离级别、索引优化和故障恢复，逐项解释并举例，持续展开论述至少四千字。'
 image = base64.b64encode(Path('/deploy/tests/multimodal/receipt.png').read_bytes()).decode()
 for kind in ('text', 'image'):
@@ -36,6 +42,6 @@ for kind in ('text', 'image'):
         if repeat: records.append(record)
     full = [r for r in records if r['output_tokens'] == 1024]
     rates = [r['decode_tps_after_first'] for r in full if r['decode_tps_after_first'] is not None]
-    print(json.dumps({'summary': kind, 'full_1024_samples': len(full), 'median_client_tps': statistics.median(r['client_end_to_end_tps'] for r in full) if full else None,
+    print(json.dumps({'summary': kind, 'model': NAMES[0], 'full_1024_samples': len(full), 'median_client_tps': statistics.median(r['client_end_to_end_tps'] for r in full) if full else None,
                       'median_decode_tps': statistics.median(rates) if rates else None, 'result_file': str(out),
                       'scope': 'Single request; not C32 throughput or guaranteed production speed.'}), flush=True)

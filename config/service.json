@@ -25,5 +25,5 @@
   "dtype": "bfloat16",
   "mm_encoder_attn_backend": "TORCH_SDPA",
   "prefix_caching_hash_algo": "sha256",
-  "release": "R3.3"
+  "release": "R3.4"
 }

@@ -5,7 +5,7 @@ import os
 from pathlib import Path
 import sys
 import urllib.request
-phase = 'R3.3'
+phase = 'R3.4'
 cfg = json.loads(Path('/deploy/config/service.json').read_text())
 argv = Path('/proc/1/cmdline').read_bytes().decode().rstrip('\x00').split('\x00')
 
@@ -46,4 +46,10 @@ assert json.loads(actual['speculative_config'][0]) == cfg['speculative_config']
 assert '--enable-prompt-tokens-details' in argv and '--enable-force-include-usage' in argv
 assert env['VLLM_USE_V2_MODEL_RUNNER'] == env['VLLM_USE_BREAKABLE_CUDAGRAPH'] == '1'
 assert sha == '531b7a867bf2391d25be37c49ff34172b6186bd8f4b16f295e8f9532c1633d4a'
-print('EFFECTIVE_STATE_R33=PASS MEMORY=0.92 CONTEXT=262144 CONCURRENCY=32 MULTIMODAL=ON IMAGE_LIMIT=999 USAGE_DETAILS=ON AUTH=DISABLED', flush=True)
+print('EFFECTIVE_STATE_R34=PASS MEMORY=0.92 CONTEXT=262144 CONCURRENCY=32 MULTIMODAL=ON IMAGE_LIMIT=999 USAGE_DETAILS=ON AUTH=DISABLED', flush=True)
+
+overlay = json.loads(Path('/deploy/source/overlay-manifest.json').read_text())
+for relative, expected in overlay.items():
+    path = Path('/usr/local/lib/python3.12/dist-packages') / relative
+    assert hashlib.sha256(path.read_bytes()).hexdigest() == expected, relative
+print('R34_RUNTIME_OVERLAY=PASS AUX_REUSE=ON STACKED_WKV=ON DSPARK_K=6', flush=True)

@@ -12,7 +12,7 @@ import uuid
 BASE = "http://host.docker.internal:8005"
 KEY = ''
 NAMES = ["DeepSeek-V4-Flash"]
-TRACE = Path("/results") / ("cache-r33-" + datetime.datetime.now().strftime("%Y%m%d-%H%M%S-%f") + ".jsonl")
+TRACE = Path("/results") / ("cache-r34-" + datetime.datetime.now().strftime("%Y%m%d-%H%M%S-%f") + ".jsonl")
 HTTP = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 UNIT = "This line is filler for prefix reuse; it contains no answer.\n"
 

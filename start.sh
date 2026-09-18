@@ -1,21 +1,21 @@
 #!/usr/bin/env bash
 set -euo pipefail
 source "$(dirname -- "$0")/scripts/lib.sh"
-[[ $# == 0 ]] || die '用法：bash start.sh；R3.3 只有最终部署配置'
+[[ $# == 0 ]] || die '用法：bash start.sh；R3.4 只有最终部署配置'
 exec 9>"$RUNTIME/control/start-stop.lock"
-flock -n 9 || die '另一个 R3.3 启停正在进行'
+flock -n 9 || die '另一个 R3.4 启停正在进行'
 check_image
 check_files
 # Reject old services and occupied ports before touching the current service.
-for old in dsv4-flash-r32 dsv4-flash-r31 dsv4-vision-r3-scheme1 dsv4-vision-r3-scheme2 dsv4-vision-r3-scheme3 dsv4-vision-r3-scheme4; do
-  if running "$old"; then die "旧容器 $old 仍在运行；先使用旧安装包的 stop.sh 停止，再运行本脚本；原 API key 请保留在 deployment.env"; fi
+for old in dsv4-flash-r33 dsv4-flash-r32 dsv4-flash-r31 dsv4-vision-r3-scheme1 dsv4-vision-r3-scheme2 dsv4-vision-r3-scheme3 dsv4-vision-r3-scheme4; do
+  if running "$old"; then die "旧容器 $old 仍在运行；先使用旧安装包的 stop.sh 停止，再运行本脚本"; fi
 done
 if exists "$CONTAINER"; then
   owned "$CONTAINER"
   if running "$CONTAINER"; then
     dc exec "$CONTAINER" /opt/r3/bin/python /deploy/scripts/effective_state.py
     client /deploy/scripts/health.py http://host.docker.internal:8005
-    log 'R3.3 已运行；需要重新启动时执行 bash stop.sh 后再 bash start.sh'
+    log 'R3.4 已运行；需要重新启动时执行 bash stop.sh 后再 bash start.sh'
     exit 0
   fi
 fi
@@ -36,7 +36,7 @@ dc run -d --restart unless-stopped --pull never --name "$CONTAINER" \
   --label "com.deepseek.owner=$OWNER" --label com.deepseek.role=inference \
   --network bridge --publish '127.0.0.1:8005:8005' --publish "$gateway:8005:8005" \
   --gpus all --shm-size 64g --ulimit memlock=-1:-1 --ulimit stack=67108864:67108864 \
-  "${R33_MOUNTS[@]}" \
+  "${R34_MOUNTS[@]}" \
   --mount "type=bind,src=$MODEL_DIR,dst=/model,readonly" \
   --mount "type=bind,src=$PACKAGE_DIR,dst=/deploy,readonly" \
   --mount "type=bind,src=$RUNTIME/cache,dst=/runtime-cache" \
@@ -51,7 +51,7 @@ dc run -d --restart unless-stopped --pull never --name "$CONTAINER" \
 failed(){
   dc logs --timestamps "$CONTAINER" > "$RESULTS/startup-failed-$run_id.log" 2>&1 || true
   dc stop --time 90 "$CONTAINER" >/dev/null 2>&1 || true
-  die "R3.3 启动未通过；失败容器已停止，保留日志 $RESULTS/startup-failed-$run_id.log"
+  die "R3.4 启动未通过；失败容器已停止，保留日志 $RESULTS/startup-failed-$run_id.log"
 }
 for ((i=0;i<720;i++)); do
   state=$(dc inspect --format '{{.State.Status}} {{.RestartCount}}' "$CONTAINER")
@@ -60,7 +60,7 @@ for ((i=0;i<720;i++)); do
     dc exec "$CONTAINER" /opt/r3/bin/python /deploy/scripts/effective_state.py || failed
     client /deploy/scripts/health.py http://host.docker.internal:8005 || failed
     dc logs --timestamps "$CONTAINER" > "$RESULTS/startup-$run_id.log" 2>&1
-    log 'R3.3 START=PASS DeepSeek-V4-Flash；执行 bash verify.sh 完成完整验收'
+    log 'R3.4 START=PASS DeepSeek-V4-Flash；执行 bash verify.sh 完成完整验收'
     exit 0
   fi
   ((i%6)) || log "等待模型加载/编译：$((i*10)) 秒"

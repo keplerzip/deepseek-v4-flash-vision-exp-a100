@@ -27,5 +27,10 @@ __pycache__/
 *.pth
 *.log
 source/vllm-source/
-upgrade/upgrade-r33.sh
-upgrade/base64-r3.3.cmd
+upgrade/upgrade-r34.sh
+upgrade/base64-r3.4.cmd
+# Encoded deployment payloads and delivery metadata are local-only.
+base64*.cmd
+base64*.sh
+upgrade/payload.json
+upgrade/delivery.json
