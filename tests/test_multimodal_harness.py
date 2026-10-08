@@ -4,6 +4,7 @@
 import contextlib
 import importlib.util
 import json
+import os
 from pathlib import Path
 from unittest.mock import patch
 
@@ -140,10 +141,11 @@ def main():
         "real_inference_requests_executed": False,
         "gpu_inference_tested": False,
     }
-    (ROOT / "validation").mkdir(exist_ok=True)
-    (ROOT / "validation/multimodal-harness.json").write_text(
-        json.dumps(report, ensure_ascii=False, indent=2) + "\n"
-    )
+    # Deployment sources are mounted read-only; report output is optional.
+    if output := os.environ.get("R38_HARNESS_REPORT"):
+        path = Path(output)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n")
     print(
         json.dumps(
             {

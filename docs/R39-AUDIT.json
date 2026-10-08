@@ -1,0 +1,29 @@
+{
+  "release": "R3.9",
+  "baseline": "R3.8",
+  "date": "2026-09-29",
+  "runtime_cpu_tests": {
+    "passed": 195,
+    "new_multimodal_tests": 51,
+    "log_sha256": "7a68b53c62786570cc5b17c2cc354ca479b51508ce5e2c886c1184b3f177e686"
+  },
+  "installer_controller_simulation": {
+    "passed": 10,
+    "log_sha256": "1d37c23e6d82594279e197bb6bb156beffbb8c739811a147fa3dceb18233142a"
+  },
+  "delta_delivery_simulation": {
+    "passed": 8,
+    "log_sha256": "15bd0898280a84f19b898d83257380b7a642a1aab0c07df8bf399b9636d6199f"
+  },
+  "gateway_routing_mock": "PASS; routing/auth propagation and failed image-check aggregation only",
+  "negative_controls": {
+    "r37_r38_basic_tool_images": "4 expected failures, 4 user-image passes in each baseline",
+    "r38_additional_tool_image_routes": "6 expected failures; fixed source passes"
+  },
+  "local_gpu_inference": "NOT_RUN: no GPU on build host",
+  "target_installation_acceptance": "mandatory; includes 22 tool-image requests plus inherited multimodal/protocol/cache/C32/long-context checks",
+  "live_newapi_and_codex": "NOT_RUN on build host; real original request was not captured",
+  "native_kernels_changed": false,
+  "weights_changed": false,
+  "tps_improvement_claimed": false
+}

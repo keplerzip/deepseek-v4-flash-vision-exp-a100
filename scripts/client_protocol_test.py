@@ -55,10 +55,25 @@ def wire(path, payload):
     return result
 
 def tool_result():
-    return {'port':8006,'receipt':'R34_'+uuid.uuid4().hex[:10]}
+    return {'port':8006,'receipt':'R39_'+uuid.uuid4().hex[:10]}
+
+def check_streamed_call(events, call, custom=False):
+    """The client must be able to replay the same item and call it saw in SSE."""
+    added = [x['item'] for x in events if x['type']=='response.output_item.added' and x['item'].get('id')==call['id']]
+    done = [x['item'] for x in events if x['type']=='response.output_item.done' and x['item'].get('id')==call['id']]
+    assert len(added)==len(done)==1, (added,done,call)
+    assert added[0]['call_id']==done[0]['call_id']==call['call_id']
+    assert done[0]==call, (done[0],call)
+    prefix = 'response.custom_tool_call_input' if custom else 'response.function_call_arguments'
+    field = 'input' if custom else 'arguments'
+    deltas = [x['delta'] for x in events if x['type']==prefix+'.delta' and x['item_id']==call['id']]
+    endings = [x for x in events if x['type']==prefix+'.done' and x['item_id']==call['id']]
+    assert deltas and len(endings)==1
+    assert ''.join(deltas)==endings[0][field]==call[field]
 
 def responses():
-    user = {'role':'user','content':[{'type':'input_text','text':PROMPT},{'type':'input_image','image_url':'data:image/png;base64,'+IMAGE,'detail':'auto'}]}
+    # Omitted detail exercises the R3.7 default; explicit invalid values stay errors.
+    user = {'role':'user','content':[{'type':'input_text','text':PROMPT},{'type':'input_image','image_url':'data:image/png;base64,'+IMAGE}]}
     body = {'model':MODEL,'input':[user],'tools':[{'type':'function','name':'record_port','description':'Record the image service port and return a receipt.','parameters':SCHEMA}],'tool_choice':'auto','max_output_tokens':1024,'stream':True,'store':False,'temperature':0,'chat_template_kwargs':{'thinking':False}}
     first = wire('/v1/responses',body)
     kinds = [x['type'] for x in first]
@@ -68,6 +83,7 @@ def responses():
     calls = [x for x in response['output'] if x['type']=='function_call']
     assert len(calls)==1 and calls[0]['name']=='record_port', response
     call = calls[0]
+    check_streamed_call(first,call)
     args = json.loads(call['arguments'])
     assert type(args.get('port')) is int and args=={'port':8006}, args
     assert call['call_id']
@@ -80,7 +96,33 @@ def responses():
     assert final['model'] == MODEL
     actual = json.loads(''.join(c['text'] for x in final['output'] if x['type']=='message' for c in x['content'] if c['type']=='output_text'))
     assert actual == expected, (actual,expected)
-    return {'actual':actual,'streamed_function_arguments':True,'tool_result_id_matched':True}
+    return {'actual':actual,'streamed_function_arguments':True,'tool_result_id_matched':True,'stream_final_identity_matched':True,'omitted_image_detail':True}
+
+def responses_custom():
+    prompt = '读取图片服务端口，必须调用 record_port 工具。工具输入只写实际端口的十进制数字。收到工具结果后，仅返回 JSON 对象，包含 port 和 receipt；receipt 必须原样使用工具返回值，不要输出解释或 Markdown。'
+    user = {'role':'user','content':[{'type':'input_text','text':prompt},{'type':'input_image','image_url':'data:image/png;base64,'+IMAGE}]}
+    body = {'model':MODEL,'input':[user], 'tools':[{'type':'custom','name':'record_port',
+        'description':'Record the image service port. Input is the decimal port number as plain text.',
+        'format':{'type':'text'}}], 'tool_choice':'auto','stream':True,'store':False,
+        'max_output_tokens':1024,'temperature':0,'chat_template_kwargs':{'thinking':False}}
+    first = wire('/v1/responses',body)
+    response = next(x['response'] for x in first if x['type']=='response.completed')
+    assert response['model']==MODEL
+    calls = [x for x in response['output'] if x['type']=='custom_tool_call']
+    assert len(calls)==1 and calls[0]['name']=='record_port', response
+    call = calls[0]
+    assert call['input'].strip()=='8006' and call['call_id'], call
+    check_streamed_call(first,call,custom=True)
+    expected = tool_result()
+    body['input'] = [user,*response['output'],{'type':'custom_tool_call_output',
+        'call_id':call['call_id'],'output':json.dumps(expected)}]
+    body['tool_choice'] = 'none'
+    second = wire('/v1/responses',body)
+    final = next(x['response'] for x in second if x['type']=='response.completed')
+    assert final['model']==MODEL
+    actual = json.loads(''.join(c['text'] for x in final['output'] if x['type']=='message' for c in x['content'] if c['type']=='output_text'))
+    assert actual==expected, (actual,expected)
+    return {'actual':actual,'custom_text_input':True,'stream_final_identity_matched':True,'tool_output_replay':True}
 
 def anthropic_message(events):
     kinds = [x['type'] for x in events]
@@ -148,7 +190,7 @@ def completions():
 
 def main():
     failed = []
-    for name, check in [('completions',completions),('responses-image-stream-tool-roundtrip',responses),('messages-image-stream-tool-roundtrip',messages),('messages-count-tokens',count_tokens)]:
+    for name, check in [('completions',completions),('responses-image-stream-tool-roundtrip',responses),('responses-custom-image-stream-tool-roundtrip',responses_custom),('messages-image-stream-tool-roundtrip',messages),('messages-count-tokens',count_tokens)]:
         start = time.monotonic()
         try:
             row = {'id':name,'status':'PASS','details':check()}
@@ -160,7 +202,7 @@ def main():
         print(clean(json.dumps(row,ensure_ascii=True)),flush=True)
         with TRACE.open('a') as out:
             out.write(clean(json.dumps(row,ensure_ascii=False))+'\n')
-    print(json.dumps({'CLIENT_PROTOCOL_TEST':'PASS' if not failed else 'FAIL','failed':failed,'trace_file':str(TRACE),'scope':'Actual HTTP/SSE image and ordinary function tools; not full Codex/Claude Code client certification'}),flush=True)
+    print(json.dumps({'CLIENT_PROTOCOL_TEST':'PASS' if not failed else 'FAIL','failed':failed,'trace_file':str(TRACE),'scope':'Actual HTTP/SSE image, function and top-level custom text tools; not grammar enforcement or full Codex/Claude Code client certification'}),flush=True)
     return bool(failed)
 
 if __name__=='__main__':

@@ -966,6 +966,15 @@ class DeepseekV4DecoderLayer(nn.Module):
             return int8_all_reduce(x)
         return tensor_model_parallel_all_reduce(x), None
 
+    def finalize_mhc_broadcast_weight(self) -> None:
+        broadcast = (
+            self.hc_attn_fn.detach().view(-1, self.hc_mult, self.hidden_size).sum(dim=1)
+        )
+        if self.hc_attn_fn_broadcast is None:
+            self.hc_attn_fn_broadcast = broadcast
+        else:
+            self.hc_attn_fn_broadcast.copy_(broadcast)
+
     def forward(
         self,
         x: torch.Tensor,
@@ -1423,11 +1432,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             return
         layer = self.layers[self.start_layer]
         if isinstance(layer, DeepseekV4DecoderLayer):
-            layer.hc_attn_fn_broadcast = (
-                layer.hc_attn_fn.detach()
-                .view(-1, layer.hc_mult, layer.hidden_size)
-                .sum(dim=1)
-            )
+            layer.finalize_mhc_broadcast_weight()
 
 
 def _make_deepseek_v4_weights_mapper(expert_dtype: str) -> WeightsMapper:

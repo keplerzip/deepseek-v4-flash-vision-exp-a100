@@ -25,7 +25,7 @@ assert all(wrapped.values()), wrapped
 assert engine.use_v2_model_runner is True, engine.use_v2_model_runner
 assert engine.model_config.architectures == ['DeepseekV4ForConditionalGeneration']
 assert engine.model_config.is_multimodal_model and engine.model_config.is_mm_prefix_lm
-assert engine.model_config.max_model_len == 262144 and engine.scheduler_config.max_num_seqs == 32
+assert engine.model_config.max_model_len == 1048576 and engine.scheduler_config.max_num_seqs == 32
 assert engine.scheduler_config.disable_chunked_mm_input
 assert engine.cache_config.enable_prefix_caching is True
 assert engine.cache_config.prefix_caching_hash_algo == 'sha256'
@@ -38,7 +38,7 @@ assert engine.model_config.multimodal_config.mm_encoder_attn_backend.name == 'TO
 assert engine.model_config.dtype == torch.bfloat16
 spec = engine.speculative_config
 assert spec.use_dspark() and spec.num_speculative_tokens == 6
-assert spec.draft_model_config.max_model_len == 262144
+assert spec.draft_model_config.max_model_len == 1048576
 assert spec.draft_model_config.architectures == ['DSparkDraftModel'], spec.draft_model_config.architectures
 assert get_model_architecture(spec.draft_model_config)[0].__name__ == 'DSparkDeepseekV4ForCausalLM'
 with set_current_vllm_config(engine):
@@ -57,4 +57,4 @@ with set_current_vllm_config(engine):
         assert renderer.get_mm_processor().info.get_tokenizer() is renderer.get_tokenizer()
     finally:
         renderer.shutdown()
-print(json.dumps({'status': 'PASS', 'scope': 'CLI/config, Worker imports, real-image CPU preprocessing; not model inference', 'release': 'R3.4', 'attention_graph_breaks': wrapped, 'model_runner': 'V2' if engine.use_v2_model_runner else 'V1', 'architecture': engine.model_config.architectures, 'dtype': str(engine.model_config.dtype), 'vision_attention': 'TORCH_SDPA', 'context': 262144, 'concurrency': 32, 'speculative_method': spec.method if spec else None, 'raw_image_tokens': len(result['prompt_token_ids']), 'prefix_caching': engine.cache_config.enable_prefix_caching, 'gpu_memory_utilization': engine.cache_config.gpu_memory_utilization, 'served_model_names': cli.served_model_name, 'gpu_inference_tested': False}, ensure_ascii=False))
+print(json.dumps({'status': 'PASS', 'scope': 'CLI/config, Worker imports, real-image CPU preprocessing; not model inference', 'release': 'R3.9', 'attention_graph_breaks': wrapped, 'model_runner': 'V2' if engine.use_v2_model_runner else 'V1', 'architecture': engine.model_config.architectures, 'dtype': str(engine.model_config.dtype), 'vision_attention': 'TORCH_SDPA', 'context': 1048576, 'concurrency': 32, 'speculative_method': spec.method if spec else None, 'raw_image_tokens': len(result['prompt_token_ids']), 'prefix_caching': engine.cache_config.enable_prefix_caching, 'gpu_memory_utilization': engine.cache_config.gpu_memory_utilization, 'served_model_names': cli.served_model_name, 'gpu_inference_tested': False}, ensure_ascii=False))

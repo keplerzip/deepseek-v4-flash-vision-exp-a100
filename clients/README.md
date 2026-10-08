@@ -1,6 +1,6 @@
 # R3.3 客户端示例
 
-所有配置仅使用 `DeepSeek-V4-Flash`，保留 262144 上下文。Codex 通过 Responses HTTP/SSE，Anthropic 客户端通过 Messages HTTP/SSE 连接同一服务。这里的示例不会自动安装或覆盖客户端配置。
+所有示例只使用 `DeepSeek-V4-Flash`，服务窗口为 1,048,576。Codex 通过原生 Responses HTTP/SSE，Claude 通过原生 Messages HTTP/SSE 连接同一服务。示例不会自动安装或覆盖客户端配置。服务端不要求 API key；经过 New API 时，网关的鉴权和计费由网关配置决定。
 
 模型后端免鉴权，不需要配置 API key。将示例中需要的配置合并到客户端现有文件。个别 SDK 如自行强制要求 key 参数，可用任意本地占位文本，后端不校验它。
 

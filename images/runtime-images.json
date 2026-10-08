@@ -22,8 +22,15 @@
   },
   "dsv4-flash-a100:20260914-r3.3": {
     "ids": [
-      "sha256:3a93108b2925da6d5498f2a7f7c442159b7a14fc0d6e64da3bbcc5b0a3a338e9"
+      "sha256:3a93108b2925da6d5498f2a7f7c442159b7a14fc0d6e64da3bbcc5b0a3a338e9",
+      "sha256:0d3521953558cd685c3216611f15c78ef99e06201a42e2791e0b0ed5b26345ed"
     ],
     "release": "2026.09.14-r3.3"
+  },
+  "dsv4-flash-a100:20260923-r3.8-1m-c32": {
+    "ids": [
+      "sha256:17e88d6b175e2ff7bfe4c5edcaa6a5cbef0951584b09e47fc06de580325aac22"
+    ],
+    "release": "2026.09.23-r3.8"
   }
 }

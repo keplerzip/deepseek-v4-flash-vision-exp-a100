@@ -1,0 +1,2217 @@
+--- a/vllm/entrypoints/anthropic/serving.py
++++ b/vllm/entrypoints/anthropic/serving.py
+@@ -49,6 +49,7 @@
+ from vllm.entrypoints.serve.utils.api_utils import sanitize_message
+ from vllm.entrypoints.serve.utils.request_logger import RequestLogger
+ from vllm.renderers.online_renderer import OnlineRenderer
++from vllm.tokenizers.protocol import TokenizerLike
+ 
+ logger = logging.getLogger(__name__)
+ 
+@@ -138,18 +139,34 @@
+             "length": "max_tokens",
+             "tool_calls": "tool_use",
+         }
+-        self._merge_inline_system = self._detect_merge_inline_system(chat_template)
++        self._merge_inline_system = self._detect_merge_inline_system(
++            chat_template, getattr(self.renderer, "tokenizer", None)
++        )
++        self._preserve_trailing_system = (
++            not self._merge_inline_system
++            and getattr(self.renderer.tokenizer, "supports_inline_system_messages", False) is True
++        )
+ 
+     @staticmethod
+-    def _detect_merge_inline_system(chat_template: str | None) -> bool:
++    def _detect_merge_inline_system(
++        chat_template: str | None,
++        tokenizer: TokenizerLike | None = None,
++    ) -> bool:
+         """Auto-detect whether the chat template requires system-first ordering.
+ 
+         Renders a [system, user, system, user] conversation against the
+         template; if it raises (e.g. Qwen's ``loop.first`` guard), the
+         model needs inline system messages merged into the leading block.
++
++        Without a jinja template the tokenizer decides: encoder based
++        tokenizers that render ``role: system`` at any position declare
++        ``supports_inline_system_messages`` (e.g. DeepSeek V4), so their
++        inline system messages stay in place and the prompt prefix of earlier
++        turns is unchanged. Any other tokenizer keeps the conservative merge.
+         """
+         if not chat_template:
+-            return True
++            supported = getattr(tokenizer, "supports_inline_system_messages", False)
++            return supported is not True
+         try:
+             env = jinja2.sandbox.ImmutableSandboxedEnvironment(
+                 trim_blocks=True,
+@@ -196,6 +213,7 @@
+         anthropic_request: AnthropicMessagesRequest | AnthropicCountTokensRequest,
+         *,
+         merge_inline_system: bool = False,
++        preserve_trailing_system: bool = False,
+     ) -> ChatCompletionRequest:
+         """Convert Anthropic message format to OpenAI format"""
+         openai_messages: list[dict[str, Any]] = []
+@@ -204,11 +222,13 @@
+             anthropic_request,
+             openai_messages,
+             merge_inline_system=merge_inline_system,
++            preserve_trailing_system=preserve_trailing_system,
+         )
+         cls._convert_messages(
+             anthropic_request.messages,
+             openai_messages,
+             merge_inline_system=merge_inline_system,
++            preserve_trailing_system=preserve_trailing_system,
+         )
+         req = cls._build_base_request(anthropic_request, openai_messages)
+         cls._handle_streaming_options(req, anthropic_request)
+@@ -224,6 +244,7 @@
+         openai_messages: list[dict[str, Any]],
+         *,
+         merge_inline_system: bool = False,
++        preserve_trailing_system: bool = False,
+     ) -> None:
+         """Convert Anthropic system message to OpenAI format"""
+         system_parts: list[str] = []
+@@ -248,6 +269,8 @@
+         # Mid-conversation system turns remain in place for prefix caching.
+         if merge_inline_system:
+             inline = [m for m in anthropic_request.messages if m.role == "system"]
++        elif preserve_trailing_system:
++            inline = []
+         else:
+             inline = cls._trailing_system_messages(anthropic_request.messages)
+         for msg in inline:
+@@ -289,10 +312,13 @@
+         openai_messages: list[dict[str, Any]],
+         *,
+         merge_inline_system: bool = False,
++        preserve_trailing_system: bool = False,
+     ) -> None:
+         """Convert Anthropic messages to OpenAI format"""
+         if merge_inline_system:
+             skip_ids = {id(m) for m in messages if m.role == "system"}
++        elif preserve_trailing_system:
++            skip_ids = set()
+         else:
+             skip_ids = {id(m) for m in cls._trailing_system_messages(messages)}
+         for msg in messages:
+@@ -615,6 +641,7 @@
+         chat_req = self._convert_anthropic_to_openai_request(
+             request,
+             merge_inline_system=self._merge_inline_system,
++            preserve_trailing_system=self._preserve_trailing_system,
+         )
+         if logger.isEnabledFor(logging.DEBUG):
+             logger.debug("Convert to OpenAI request %s", chat_req.model_dump_json())
+@@ -1018,6 +1045,7 @@
+         chat_req = self._convert_anthropic_to_openai_request(
+             request,
+             merge_inline_system=self._merge_inline_system,
++            preserve_trailing_system=self._preserve_trailing_system,
+         )
+         result = await self.render_chat_request(chat_req)
+         if isinstance(result, ErrorResponse):
+
+--- a/vllm/entrypoints/openai/responses/protocol.py
++++ b/vllm/entrypoints/openai/responses/protocol.py
+@@ -4,7 +4,7 @@
+ # Adapted from
+ # https://github.com/lm-sys/FastChat/blob/168ccc29d3f7edc50823016105c024fe2282732a/fastchat/protocol/openai_api_protocol.py
+ import time
+-from typing import Any, Literal, TypeAlias
++from typing import Annotated, Any, Literal, TypeAlias
+ 
+ from openai.types.responses import (
+     ResponseCodeInterpreterCallCodeDeltaEvent,
+@@ -14,6 +14,8 @@
+     ResponseCodeInterpreterCallInterpretingEvent,
+     ResponseContentPartAddedEvent,
+     ResponseContentPartDoneEvent,
++    ResponseCustomToolCallInputDeltaEvent,
++    ResponseCustomToolCallInputDoneEvent,
+     ResponseFunctionToolCall,
+     ResponseInputItemParam,
+     ResponseMcpCallArgumentsDeltaEvent,
+@@ -49,6 +51,7 @@
+ from openai.types.shared import Metadata, Reasoning
+ from openai_harmony import Message as OpenAIHarmonyMessage
+ from pydantic import (
++    BeforeValidator,
+     Field,
+     ValidationError,
+     field_serializer,
+@@ -131,6 +134,31 @@
+     list[ChatCompletionMessageParam] | list[ResponseRawMessageAndToken]
+ )
+ ResponseInputOutputItem: TypeAlias = ResponseInputItemParam | ResponseOutputItem
++
++
++def _default_input_image_details(value: Any) -> Any:
++    """Set the API default for input images before SDK type validation."""
++    if not isinstance(value, dict):
++        return value
++
++    content = value.get("content")
++    if not isinstance(content, list):
++        return value
++
++    new_content = []
++    changed = False
++    for part in content:
++        new_part = part
++        if (
++            isinstance(part, dict)
++            and part.get("type") == "input_image"
++            and "detail" not in part
++        ):
++            new_part = {**part, "detail": "auto"}
++            changed = True
++        new_content.append(new_part)
++
++    return {**value, "content": new_content} if changed else value
+ 
+ 
+ class ResponsesRequest(OpenAIBaseModel):
+@@ -150,7 +178,15 @@
+         ]
+         | None
+     ) = None
+-    input: str | list[ResponseInputOutputItem]
++    input: (
++        str
++        | list[
++            Annotated[
++                ResponseInputOutputItem,
++                BeforeValidator(_default_input_image_details),
++            ]
++        ]
++    )
+     instructions: str | None = None
+     max_output_tokens: int | None = None
+     max_tool_calls: int | None = None
+@@ -595,9 +631,9 @@
+         tools = data.get("tools")
+         tool_choice = data.get("tool_choice", "auto")
+         has_tools = tools is not None and len(tools) > 0
+-        is_named_tool_choice = (
+-            isinstance(tool_choice, dict) and tool_choice.get("type") == "function"
+-        )
++        is_named_tool_choice = isinstance(tool_choice, dict) and tool_choice.get(
++            "type"
++        ) in ("function", "custom")
+ 
+         if not has_tools:
+             if tool_choice in ("auto", "none"):
+@@ -847,6 +883,8 @@
+     | ResponseOutputItemDoneEvent
+     | ResponseContentPartAddedEvent
+     | ResponseContentPartDoneEvent
++    | ResponseCustomToolCallInputDeltaEvent
++    | ResponseCustomToolCallInputDoneEvent
+     | ResponseReasoningTextDeltaEvent
+     | ResponseReasoningTextDoneEvent
+     | ResponseReasoningPartAddedEvent
+
+--- a/vllm/entrypoints/openai/responses/serving.py
++++ b/vllm/entrypoints/openai/responses/serving.py
+@@ -12,6 +12,7 @@
+ 
+ from fastapi import Request
+ from openai.types.responses import (
++    ResponseCustomToolCall,
+     ResponseFunctionToolCall,
+     ResponseOutputItem,
+     ResponseOutputMessage,
+@@ -1514,6 +1515,7 @@
+                 )
+             )
+ 
++            streamed_tool_calls: list[ResponseFunctionToolCall | ResponseCustomToolCall] = []
+             try:
+                 async for event_data in processor(
+                     request,
+@@ -1526,6 +1528,12 @@
+                     created_time,
+                     _increment_sequence_number_and_return,
+                 ):
++                    if (
++                        not self.use_harmony
++                        and event_data.type == "response.output_item.done"
++                        and isinstance(event_data.item, (ResponseFunctionToolCall, ResponseCustomToolCall))
++                    ):
++                        streamed_tool_calls.append(event_data.item)
+                     yield event_data
+             except GenerationError as e:
+                 error_json = self._convert_generation_error_to_streaming_response(e)
+@@ -1550,6 +1558,13 @@
+                 request_metadata,
+                 created_time=created_time,
+             )
++            if not self.use_harmony and streamed_tool_calls and isinstance(final_response, ResponsesResponse):
++                streamed_calls = iter(streamed_tool_calls)
++                final_response.output = [
++                    next(streamed_calls, item)
++                    if isinstance(item, (ResponseFunctionToolCall, ResponseCustomToolCall)) else item
++                    for item in final_response.output
++                ]
+             yield _increment_sequence_number_and_return(
+                 ResponseCompletedEvent(
+                     type="response.completed",
+
+--- a/vllm/entrypoints/openai/responses/streaming_events.py
++++ b/vllm/entrypoints/openai/responses/streaming_events.py
+@@ -30,6 +30,9 @@
+     ResponseCodeInterpreterToolCallParam,
+     ResponseContentPartAddedEvent,
+     ResponseContentPartDoneEvent,
++    ResponseCustomToolCall,
++    ResponseCustomToolCallInputDeltaEvent,
++    ResponseCustomToolCallInputDoneEvent,
+     ResponseFunctionCallArgumentsDeltaEvent,
+     ResponseFunctionCallArgumentsDoneEvent,
+     ResponseFunctionToolCall,
+@@ -39,6 +42,7 @@
+     ResponseMcpCallArgumentsDoneEvent,
+     ResponseMcpCallCompletedEvent,
+     ResponseMcpCallInProgressEvent,
++    ResponseOutputItem,
+     ResponseOutputItemAddedEvent,
+     ResponseOutputItemDoneEvent,
+     ResponseOutputMessage,
+@@ -74,6 +78,9 @@
+ )
+ from vllm.entrypoints.openai.responses.utils import (
+     build_responses_tool_call_name_map,
++    custom_tool_names,
++    decode_custom_tool_input,
++    decode_custom_tool_input_prefix,
+     resolve_responses_tool_call_name,
+ )
+ from vllm.outputs import CompletionOutput
+@@ -667,7 +674,7 @@
+         )
+     elif function_name == "find":
+         action = response_function_web_search.ActionFind(
+-            type="find",
++            type="find_in_page",
+             pattern=parsed_args["pattern"],
+             # TODO: translate to url
+             url=f"cursor:{parsed_args.get('cursor', '')}",
+@@ -822,7 +829,8 @@
+     tool_call_name: str = ""
+     tool_call_namespace: str | None = None
+     tool_call_index: int | None = None
+-    has_emitted_tool_call_delta: bool = False
++    tool_call_is_custom: bool = False
++    tool_call_payload: str = ""
+     current_state: _StateType = field(default_factory=lambda: _StateType.NONE)
+ 
+ 
+@@ -1023,30 +1031,63 @@
+     name: str,
+     index: int | None,
+     namespace: str | None = None,
++    is_custom: bool = False,
++    call_id: str | None = None,
+ ) -> list[StreamingResponsesResponse]:
+     state.current_state = _StateType.TOOL_CALL
+-    state.current_item_id = random_uuid()
+-    state.tool_call_id = f"call_{random_uuid()}"
++    state.current_item_id = f"ctc_{random_uuid()}" if is_custom else random_uuid()
++    state.tool_call_id = call_id or f"call_{random_uuid()}"
+     state.tool_call_name = name
+     state.tool_call_namespace = namespace
+     state.tool_call_index = index
++    state.tool_call_is_custom = is_custom
++    state.tool_call_payload = ""
+     state.accumulated_text = ""
+-    state.has_emitted_tool_call_delta = False
++    item: ResponseOutputItem
++    if is_custom:
++        item = ResponseCustomToolCall(
++            type="custom_tool_call",
++            id=state.current_item_id,
++            call_id=state.tool_call_id,
++            name=name,
++            input="",
++        )
++    else:
++        item = ResponseFunctionToolCallItem(
++            type="function_call",
++            id=state.current_item_id,
++            call_id=state.tool_call_id,
++            name=name,
++            namespace=namespace,
++            arguments="",
++            status="in_progress",
++        )
+     return [
+         ResponseOutputItemAddedEvent(
+             type="response.output_item.added",
+             sequence_number=-1,
+             output_index=state.output_index,
+-            item=ResponseFunctionToolCallItem(
+-                type="function_call",
+-                id=state.current_item_id,
+-                call_id=state.tool_call_id,
+-                name=name,
+-                namespace=namespace,
+-                arguments="",
+-                status="in_progress",
+-            ),
++            item=item,
+         ),
++    ]
++
++
++def _emit_custom_tool_input_delta(
++    state: SimpleStreamingState,
++    payload: str,
++) -> list[StreamingResponsesResponse]:
++    streamed = state.tool_call_payload
++    if not payload.startswith(streamed) or len(payload) == len(streamed):
++        return []
++    state.tool_call_payload = payload
++    return [
++        ResponseCustomToolCallInputDeltaEvent(
++            type="response.custom_tool_call_input.delta",
++            sequence_number=-1,
++            output_index=state.output_index,
++            item_id=state.current_item_id,
++            delta=payload[len(streamed) :],
++        )
+     ]
+ 
+ 
+@@ -1055,7 +1096,10 @@
+     delta: str,
+ ) -> list[StreamingResponsesResponse]:
+     state.accumulated_text += delta
+-    state.has_emitted_tool_call_delta = True
++    if state.tool_call_is_custom:
++        return _emit_custom_tool_input_delta(
++            state, decode_custom_tool_input_prefix(state.accumulated_text)
++        )
+     return [
+         ResponseFunctionCallArgumentsDeltaEvent(
+             type="response.function_call_arguments.delta",
+@@ -1070,9 +1114,31 @@
+ def emit_simple_tool_call_done(
+     state: SimpleStreamingState,
+ ) -> list[StreamingResponsesResponse]:
+-    events: list[StreamingResponsesResponse] = []
+-    if state.has_emitted_tool_call_delta:
++    events: list[StreamingResponsesResponse]
++    item: ResponseOutputItem
++    if state.tool_call_is_custom:
++        payload = decode_custom_tool_input(state.accumulated_text)
++        if not payload.startswith(state.tool_call_payload):
++            payload = state.tool_call_payload or payload
++        events = _emit_custom_tool_input_delta(state, payload)
+         events.append(
++            ResponseCustomToolCallInputDoneEvent(
++                type="response.custom_tool_call_input.done",
++                sequence_number=-1,
++                output_index=state.output_index,
++                item_id=state.current_item_id,
++                input=payload,
++            )
++        )
++        item = ResponseCustomToolCall(
++            type="custom_tool_call",
++            id=state.current_item_id,
++            call_id=state.tool_call_id,
++            name=state.tool_call_name,
++            input=payload,
++        )
++    else:
++        events = [
+             ResponseFunctionCallArgumentsDoneEvent(
+                 type="response.function_call_arguments.done",
+                 sequence_number=-1,
+@@ -1081,25 +1147,27 @@
+                 arguments=state.accumulated_text,
+                 name=state.tool_call_name,
+             )
++        ]
++        item = ResponseFunctionToolCall(
++            type="function_call",
++            name=state.tool_call_name,
++            namespace=state.tool_call_namespace,
++            arguments=state.accumulated_text,
++            status="completed",
++            id=state.current_item_id,
++            call_id=state.tool_call_id,
+         )
+     events.append(
+         ResponseOutputItemDoneEvent(
+             type="response.output_item.done",
+             sequence_number=-1,
+             output_index=state.output_index,
+-            item=ResponseFunctionToolCall(
+-                type="function_call",
+-                name=state.tool_call_name,
+-                namespace=state.tool_call_namespace,
+-                arguments=state.accumulated_text,
+-                status="completed",
+-                id=state.current_item_id,
+-                call_id=state.tool_call_id,
+-            ),
+-        ),
++            item=item,
++        )
+     )
+     state.output_index += 1
+     state.tool_call_namespace = None
++    state.tool_call_is_custom = False
+     state.current_state = _StateType.NONE
+     return events
+ 
+@@ -1184,6 +1252,7 @@
+     ) -> None:
+         self.state = state or SimpleStreamingState()
+         self.tool_call_name_map = build_responses_tool_call_name_map(tools)
++        self.custom_tool_names = custom_tool_names(tools)
+ 
+     def resolve_target_state(
+         self, delta_message: DeltaMessage
+@@ -1249,6 +1318,8 @@
+                 call_name.name,
+                 tool_call.index,
+                 call_name.namespace,
++                call_name.name in self.custom_tool_names,
++                call_id=tool_call.id,
+             )
+         return handlers.open_fn(self.state)
+ 
+
+--- a/vllm/entrypoints/openai/responses/utils.py
++++ b/vllm/entrypoints/openai/responses/utils.py
+@@ -1,6 +1,7 @@
+ # SPDX-License-Identifier: Apache-2.0
+ # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+ 
++import json
+ from collections.abc import Iterable
+ from typing import Any
+ 
+@@ -13,6 +14,7 @@
+     Function as FunctionCallTool,
+ )
+ from openai.types.responses import (
++    ResponseCustomToolCall,
+     ResponseFunctionToolCall,
+     ResponseOutputItem,
+     ResponseOutputMessage,
+@@ -37,8 +39,10 @@
+ )
+ from vllm.entrypoints.openai.engine.protocol import FunctionCall, FunctionDefinition
+ from vllm.entrypoints.openai.responses.protocol import ResponseInputOutputItem
++from vllm.exceptions import VLLMValidationError
+ from vllm.logger import init_logger
+ from vllm.tool_parsers.utils import (
++    CUSTOM_TOOL_INPUT_KEY,
+     build_responses_tool_call_name_map,
+     flat_namespace_tool_name,
+     iter_response_function_tool_dicts,
+@@ -47,6 +51,109 @@
+ from vllm.utils import random_uuid
+ 
+ logger = init_logger(__name__)
++
++
++def custom_tool_names(tools: list[Tool] | None) -> frozenset[str]:
++    return frozenset(tool.name for tool in tools or [] if tool.type == "custom")
++
++
++def encode_custom_tool_input(payload: str) -> str:
++    return json.dumps({CUSTOM_TOOL_INPUT_KEY: payload}, ensure_ascii=False)
++
++
++def decode_custom_tool_input(arguments: str) -> str:
++    """Payload of a completed shim call; bare text is passed through."""
++    try:
++        parsed = json.loads(arguments)
++    except ValueError:
++        return arguments
++    if isinstance(parsed, dict):
++        value = parsed.get(CUSTOM_TOOL_INPUT_KEY)
++        if not isinstance(value, str) and len(parsed) == 1:
++            value = next(iter(parsed.values()))
++        if isinstance(value, str):
++            return value
++    return arguments
++
++
++_JSON_SIMPLE_ESCAPES = {
++    '"': '"',
++    "\\": "\\",
++    "/": "/",
++    "b": "\b",
++    "f": "\f",
++    "n": "\n",
++    "r": "\r",
++    "t": "\t",
++}
++
++
++def _decode_unicode_escape(buffer: str, i: int) -> tuple[str, int] | None:
++    """Decode ``\\uXXXX`` at ``buffer[i]``, joining a complete surrogate pair."""
++
++    def code_at(pos: int) -> int | None:
++        if pos + 6 > len(buffer) or buffer[pos : pos + 2] != "\\u":
++            return None
++        try:
++            return int(buffer[pos + 2 : pos + 6], 16)
++        except ValueError:
++            return None
++
++    code = code_at(i)
++    if code is None:
++        return None
++    if not 0xD800 <= code <= 0xDBFF:
++        return chr(code), i + 6
++    if i + 8 <= len(buffer) and buffer[i + 6 : i + 8] != "\\u":
++        return chr(code), i + 6
++    low = code_at(i + 6)
++    if low is None:
++        return None
++    if not 0xDC00 <= low <= 0xDFFF:
++        return chr(code), i + 6
++    return chr(0x10000 + ((code - 0xD800) << 10) + (low - 0xDC00)), i + 12
++
++
++def decode_custom_tool_input_prefix(arguments: str) -> str:
++    """Longest decodable payload prefix of partial shim arguments, so that
++    streamed ``custom_tool_call_input`` deltas stay a prefix of the final input."""
++    key = json.dumps(CUSTOM_TOOL_INPUT_KEY)
++    key_at = arguments.find(key)
++    colon = arguments.find(":", key_at + len(key)) if key_at >= 0 else -1
++    start = arguments.find('"', colon + 1) if colon >= 0 else -1
++    if start < 0:
++        return ""
++    out: list[str] = []
++    i, n = start + 1, len(arguments)
++    while i < n:
++        ch = arguments[i]
++        if ch == '"':
++            break
++        if ch != "\\":
++            out.append(ch)
++            i += 1
++            continue
++        if i + 1 >= n:
++            break
++        escaped = arguments[i + 1]
++        if escaped in _JSON_SIMPLE_ESCAPES:
++            out.append(_JSON_SIMPLE_ESCAPES[escaped])
++            i += 2
++            continue
++        decoded = _decode_unicode_escape(arguments, i) if escaped == "u" else None
++        if decoded is None:
++            break
++        out.append(decoded[0])
++        i = decoded[1]
++    return "".join(out)
++
++
++def _item_type(item: ResponseInputOutputItem) -> str | None:
++    return item.get("type") if isinstance(item, dict) else getattr(item, "type", None)
++
++
++def _item_dict(item: ResponseInputOutputItem) -> dict[str, Any]:
++    return item if isinstance(item, dict) else item.model_dump()
+ 
+ 
+ def build_response_output_items(
+@@ -58,6 +165,7 @@
+ ) -> list[ResponseOutputItem]:
+     outputs: list[ResponseOutputItem] = []
+     tool_call_name_map = build_responses_tool_call_name_map(tools)
++    custom_names = custom_tool_names(tools)
+ 
+     if reasoning:
+         outputs.append(
+@@ -92,14 +200,27 @@
+ 
+     if tool_calls:
+         for idx, tool_call in enumerate(tool_calls):
++            call_id = tool_call.id or make_tool_call_id(
++                func_name=tool_call.name, idx=idx
++            )
++            if tool_call.name in custom_names:
++                outputs.append(
++                    ResponseCustomToolCall(
++                        id=f"ctc_{random_uuid()}",
++                        call_id=call_id,
++                        type="custom_tool_call",
++                        name=tool_call.name,
++                        input=decode_custom_tool_input(tool_call.arguments),
++                    )
++                )
++                continue
+             call_name = resolve_responses_tool_call_name(
+                 tool_call.name, tool_call_name_map=tool_call_name_map
+             )
+             outputs.append(
+                 ResponseFunctionToolCall(
+                     id=f"fc_{random_uuid()}",
+-                    call_id=tool_call.id
+-                    or make_tool_call_id(func_name=tool_call.name, idx=idx),
++                    call_id=call_id,
+                     type="function_call",
+                     status="completed",
+                     name=call_name.name,
+@@ -233,6 +354,7 @@
+         prev_msg if prev_msg and prev_msg.get("role") == "assistant" else None
+     )
+ 
++    tool_call: ChatCompletionMessageToolCallParam | None = None
+     if isinstance(item, ResponseFunctionToolCall):
+         tool_name = item.name
+         if item.namespace:
+@@ -245,6 +367,17 @@
+             ),
+             type="function",
+         )
++    elif _item_type(item) == "custom_tool_call":
++        call = _item_dict(item)
++        tool_call = ChatCompletionMessageToolCallParam(
++            id=call["call_id"],
++            function=FunctionCallTool(
++                name=call["name"],
++                arguments=encode_custom_tool_input(call.get("input") or ""),
++            ),
++            type="function",
++        )
++    if tool_call is not None:
+         if prev_assistant_msg:
+             tool_calls = prev_assistant_msg.get("tool_calls")
+             if tool_calls is None:
+@@ -263,17 +396,17 @@
+             logger.warning(
+                 "Previous assistant message has unknown tool_calls format. "
+                 "Tool call merging is skipped and a new assistant message is created. "
+-                "Item %s",
+-                item.id,
++                "Call %s",
++                tool_call["id"],
+             )
+         return ChatCompletionAssistantMessageParam(
+             role="assistant",
+             tool_calls=[tool_call],
+         )
+-    elif isinstance(item, ResponseReasoningItem):
++    if isinstance(item, ResponseReasoningItem):
+         reasoning = ""
+         if item.encrypted_content:
+-            raise ValueError("Encrypted content is not supported.")
++            raise VLLMValidationError("Encrypted content is not supported.", parameter="input")
+         elif item.content and len(item.content) >= 1:
+             reasoning = item.content[0].text
+         elif len(item.summary) >= 1:
+@@ -295,7 +428,9 @@
+             "reasoning": reasoning,
+         }
+     elif isinstance(item, ResponseOutputMessage):
+-        output_text = item.content[0].text
++        if any(not isinstance(part, ResponseOutputText) for part in item.content):
++            raise VLLMValidationError("Unsupported content in Responses output message", parameter="input")
++        output_text = "".join(part.text for part in item.content)
+         if prev_assistant_msg:
+             previous_content = prev_assistant_msg.get("content")
+             if previous_content is None:
+@@ -311,12 +446,12 @@
+             content=item.output,
+             tool_call_id=item.call_id,
+         )
+-    elif isinstance(item, dict) and item.get("type") == "function_call_output":
+-        # Append the function call output as a tool message.
++    elif _item_type(item) in ("function_call_output", "custom_tool_call_output"):
++        output = _item_dict(item)
+         return ChatCompletionToolMessageParam(
+             role="tool",
+-            content=item.get("output"),
+-            tool_call_id=item.get("call_id"),
++            content=output.get("output"),
++            tool_call_id=output.get("call_id"),
+         )
+     elif isinstance(item, dict) and item.get("role") == "assistant":
+         content = item.get("content")
+@@ -332,7 +467,10 @@
+                     prev_assistant_msg["content"] = text
+                     return None
+             return {"role": "assistant", "content": text}
+-    return item  # type: ignore[arg-type]
++    if isinstance(item, dict) and item.get("role") in ("user", "system", "developer", "assistant", "tool"):
++        return item  # type: ignore[return-value]
++    item_type = item.get("type") if isinstance(item, dict) else getattr(item, "type", None)
++    raise VLLMValidationError(f"Unsupported Responses input item type: {item_type}", parameter="input")
+ 
+ 
+ def extract_function_tool_names(tools: list[Tool]) -> frozenset[str]:
+
+--- a/vllm/entrypoints/serve/tokenize/protocol.py
++++ b/vllm/entrypoints/serve/tokenize/protocol.py
+@@ -2,6 +2,7 @@
+ # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+ 
+ 
++from collections.abc import Iterator
+ from typing import Annotated, Any, TypeAlias
+ 
+ from pydantic import ConfigDict, Field, model_validator
+@@ -120,12 +121,42 @@
+     @model_validator(mode="before")
+     @classmethod
+     def check_generation_prompt(cls, data):
++        if not isinstance(data, dict):
++            return data
+         if data.get("continue_final_message") and data.get("add_generation_prompt"):
+             raise VLLMValidationError(
+                 "Cannot set both `continue_final_message` and "
+                 "`add_generation_prompt` to True.",
+             )
+-        return data
++        messages = data.get("messages")
++        if not isinstance(messages, list):
++            return data
++        # Do not mutate the caller's message dictionaries during validation.
++        normalized = []
++        for message in messages:
++            if not isinstance(message, dict):
++                normalized.append(message)
++                continue
++            message = dict(message)
++            calls = message.get("tool_calls")
++            if isinstance(calls, Iterator):
++                message["tool_calls"] = list(calls)
++            reasoning_content = message.pop("reasoning_content", None)
++            if reasoning_content is not None and message.get("reasoning") is None:
++                message["reasoning"] = reasoning_content
++            normalized.append(message)
++        return {**data, "messages": normalized}
++
++    @model_validator(mode="after")
++    def materialize_tool_calls(self) -> "TokenizeChatRequest":
++        # Pydantic validates Iterable fields lazily and may wrap even a list.
++        # Materializing here also exposes invalid calls at request validation.
++        for message in self.messages:
++            if isinstance(message, dict):
++                calls = message.get("tool_calls")
++                if calls is not None and not isinstance(calls, list):
++                    message["tool_calls"] = list(calls)
++        return self
+ 
+     def build_chat_params(
+         self,
+
+--- a/vllm/model_executor/layers/sparse_attn_indexer.py
++++ b/vllm/model_executor/layers/sparse_attn_indexer.py
+@@ -623,6 +623,20 @@
+         assert decode_metadata is not None
+         kv_cache = kv_cache_as_quant_view(kv_cache, head_dim, use_fp4_cache)
+         decode_lens = decode_metadata.decode_lens
++        # requires_padding can be computed False for ragged warmup/mixed
++        # batches (seen on SM120 TP=2: 8 tokens over 6 seqs -> uniform
++        # reshape below would crash). The token-count/batch-size divisibility
++        # check is a necessary-but-not-sufficient proxy for "uniform batch"
++        # (e.g. decode_lens=[1, 2, 3] divides evenly by 3 but isn't uniform);
++        # it catches the specific case seen in practice without requiring a
++        # device sync to inspect decode_lens directly, which would break
++        # CUDA-graph-capture safety on this path. Shared by both the pack
++        # branch below and the matching unpack branch further down — they
++        # must agree on which path was taken.
++        needs_padded_path = num_decode_tokens > 0 and (
++            decode_metadata.requires_padding
++            or (decode_lens.shape[0] > 0 and num_decode_tokens % decode_lens.shape[0] != 0)
++        )
+         if num_decode_tokens == 0:
+             padded_q_quant_decode_tokens = q_quant[:1].reshape(1, 1, *q_quant.shape[1:])
+             padded_q_scale = (
+@@ -630,7 +644,7 @@
+                 if q_scale is not None
+                 else None
+             )
+-        elif decode_metadata.requires_padding:
++        elif needs_padded_path:
+             # pad in edge case where we have short chunked prefill length <
+             # decode_threshold since we unstrictly split
+             # prefill and decode by decode_threshold
+@@ -820,7 +834,7 @@
+                 decode_metadata.max_seq_len,
+             )
+ 
+-        if decode_metadata.requires_padding:
++        if needs_padded_path:
+             # if padded, we need to unpack
+             # the topk indices removing padded tokens
+             topk_indices = unpack_seq_triton(
+
+--- a/vllm/models/deepseek_v4/nvidia/dspark.py
++++ b/vllm/models/deepseek_v4/nvidia/dspark.py
+@@ -29,7 +29,7 @@
+     fused_moe_make_expert_params_mapping,
+ )
+ from vllm.model_executor.layers.layernorm import RMSNorm
+-from vllm.model_executor.layers.linear import ReplicatedLinear
++from vllm.model_executor.layers.linear import MergedColumnParallelLinear, ReplicatedLinear
+ from vllm.model_executor.layers.logits_processor import LogitsProcessor
+ from vllm.model_executor.layers.vocab_parallel_embedding import (
+     ParallelLMHead,
+@@ -52,6 +52,21 @@
+ # MoE expert scale suffix differs by expert dtype (mirrors deepseek_v4 loaders):
+ # fp4 experts register ``.weight_scale``; block-fp8 experts ``.weight_scale_inv``.
+ _EXPERT_SCALE_RE = re.compile(r"\.experts\.\d+\.w[123]\.scale$")
++
++
++_CONTEXT_WKV_RE = re.compile(r"^mtp\.(\d+)\.attn\.wkv\.(.+)$")
++
++
++def _duplicate_context_wkv_weights(weights, num_layers):
++    """Feed the SAME checkpoint weights/scales to both quantized projections."""
++    for name, weight in weights:
++        yield name, weight
++        match = _CONTEXT_WKV_RE.fullmatch(name)
++        if match is None or int(match.group(1)) >= num_layers:
++            continue
++        duplicate = weight.detach()
++        duplicate.shard_id = int(match.group(1))
++        yield f"context_wkv_proj.{match.group(2)}", duplicate
+ 
+ 
+ class DSparkDeepseekV4Model(nn.Module):
+@@ -97,6 +112,13 @@
+             ]
+         )
+ 
++        self.context_wkv_proj = MergedColumnParallelLinear(
++            config.hidden_size, [config.head_dim] * self.num_dspark_layers,
++            bias=False, return_bias=False, quant_config=vllm_config.quant_config,
++            prefix=maybe_prefix(prefix, "context_wkv_proj"), disable_tp=True,
++        )
++        self._r34_context_validated = False
++
+         # Heads: final norm + hc_head, and the Markov head
+         # Loaded from the "final" MTP layer weights (mtp.*) in the target checkpoint
+         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+@@ -150,19 +172,46 @@
+         place draft layers in different groups). ``None`` (or a ``None`` entry)
+         runs the projection to reserve workspace but writes nothing (profiling).
+         """
+-        for i, layer in enumerate(self.layers):
++        if not self._r34_context_validated:
++            self._validate_context_projection(main_x)
++        all_kv = self.context_wkv_proj(main_x).view(
++            main_x.shape[0], self.num_dspark_layers, self.config.head_dim
++        )
++        for i, (layer, kv) in enumerate(zip(self.layers, all_kv.unbind(1), strict=True)):
+             slot_mapping = (
+                 None if context_slot_mappings is None else context_slot_mappings[i]
+             )
+             attn = layer.attn
+-            # Optimized DSV4 MLA path: wkv part of the fused wq_a|wkv projection
+-            # (q_lora part discarded), then RoPE/quant/insert via the fused op.
+-            qr_kv, _ = attn.fused_wqa_wkv(main_x)
+-            kv = qr_kv[..., attn.q_lora_rank :]
+             kv = attn.kv_norm(kv)
+             if slot_mapping is None:
+                 continue
+             _insert_context_kv(attn, kv, context_positions, slot_mapping)
++
++    @torch.inference_mode()
++    def _validate_context_projection(self, main_x: torch.Tensor) -> None:
++        """Once per rank, after quantization packing, before graph capture.
++
++        Nonzero probes validate the actual loaded FP8/Marlin weight and scale
++        layout against the original fused Q+KV path. Never silently fall back.
++        GEMM shape changes can change BF16 rounding; allow small numeric drift.
++        """
++        if torch.cuda.is_current_stream_capturing():
++            raise RuntimeError("R34 WKV validation must run before CUDA graph capture")
++        generator = torch.Generator(device=main_x.device).manual_seed(3406)
++        worst = 0.0
++        for count in (1, 8, 32):
++            probe = torch.randn((count, self.hidden_size), generator=generator,
++                                device=main_x.device, dtype=main_x.dtype)
++            actual = self.context_wkv_proj(probe).view(
++                count, self.num_dspark_layers, self.config.head_dim)
++            for i, layer in enumerate(self.layers):
++                original, _ = layer.attn.fused_wqa_wkv(probe)
++                expected = original[..., layer.attn.q_lora_rank:]
++                torch.testing.assert_close(actual[:, i], expected, rtol=0.02, atol=0.02)
++                worst = max(worst, float((actual[:, i].float() - expected.float()).abs().max()))
++        self._r34_context_validated = True
++        logger.info("R34_STACKED_WKV_CHECK=PASS tp_rank=%d max_abs_diff=%.6g",
++                    get_tensor_model_parallel_rank(), worst)
+ 
+     def forward(
+         self,
+@@ -172,8 +221,8 @@
+     ) -> torch.Tensor:
+         if inputs_embeds is None:
+             inputs_embeds = self.embed_input_ids(input_ids)
+-        # Expand to hc_mult copies for hyper-connections ([T, H] -> [T, hc, H]).
+-        hidden_states = inputs_embeds.unsqueeze(-2).repeat(1, self.hc_mult, 1)
++        # R3.5: the first decoder layer broadcasts mHC from the 2D input.
++        hidden_states = inputs_embeds
+ 
+         residual = post_mix = res_mix = None
+         for layer in self.layers:
+@@ -203,6 +252,9 @@
+             self.hc_eps,
+         )
+         return hidden_states
++
++    def finalize_mhc_broadcast_weights(self) -> None:
++        self.layers[0].finalize_mhc_broadcast_weight()
+ 
+ 
+ def _insert_context_kv(
+@@ -412,6 +464,8 @@
+         head_start = n_local_head * tp_rank
+         head_end = n_local_head * (tp_rank + 1)
+ 
++        self.model._r34_context_validated = False
++        weights = _duplicate_context_wkv_weights(weights, len(self.model.layers))
+         for name, loaded_weight in weights:
+             mapped = self._remap_dspark_name(name)
+             if mapped is None:
+@@ -432,6 +486,12 @@
+                 loaded_weight = DeepseekV4Model._pad_shared_expert_weight(
+                     self.quant_config, name, loaded_weight
+                 )
++
++            if name.startswith("model.context_wkv_proj."):
++                param = params_dict[name]
++                param.weight_loader(param, loaded_weight, loaded_weight.shard_id)
++                loaded_params.add(name)
++                continue
+ 
+             # E8M0 expert scales: keep raw exponent bytes.
+             if ".experts." in name:
+@@ -486,6 +546,10 @@
+                 loaded_params.add(name)
+ 
+         self._finalize_moe()
++        # This frozen loader finalizes here, before generic quant packing.
++        # hc_attn_fn is an unquantized parameter, so its derived sum is final.
++        self.model.finalize_mhc_broadcast_weights()
++        logger.info("R35_DSPARK_BROADCAST_READY tp_rank=%d", get_tensor_model_parallel_rank())
+         logger.info_once("DSpark draft model loaded: %d params", len(loaded_params))
+         return loaded_params
+ 
+@@ -498,6 +562,8 @@
+ 
+         Returns None for non-mtp weights (owned by the target model).
+         """
++        if name.startswith("context_wkv_proj."):
++            return f"model.{name}"
+         m = re.match(r"mtp\.(\d+)\.(.*)", name)
+         if m is None:
+             return None
+
+--- a/vllm/models/deepseek_v4/nvidia/model.py
++++ b/vllm/models/deepseek_v4/nvidia/model.py
+@@ -966,6 +966,15 @@
+             return int8_all_reduce(x)
+         return tensor_model_parallel_all_reduce(x), None
+ 
++    def finalize_mhc_broadcast_weight(self) -> None:
++        broadcast = (
++            self.hc_attn_fn.detach().view(-1, self.hc_mult, self.hidden_size).sum(dim=1)
++        )
++        if self.hc_attn_fn_broadcast is None:
++            self.hc_attn_fn_broadcast = broadcast
++        else:
++            self.hc_attn_fn_broadcast.copy_(broadcast)
++
+     def forward(
+         self,
+         x: torch.Tensor,
+@@ -975,6 +984,7 @@
+         res_mix: torch.Tensor | None = None,
+         residual: torch.Tensor | None = None,
+         x_scales: torch.Tensor | None = None,
++        previous_aux: list[torch.Tensor] | None = None,
+     ) -> tuple[
+         torch.Tensor,
+         torch.Tensor,
+@@ -1047,6 +1057,11 @@
+                 x_scales=x_scales,
+             )
+ 
++        # R3.4: this is the reconstructed PREVIOUS layer residual.
++        # Capture before the FFN-side fused post/pre overwrites it.
++        if previous_aux is not None:
++            previous_aux.append(residual.mean(dim=1))
++
+         # attn_norm is fused into mhc_pre_tilelang / mhc_fused_post_pre above.
+         x = self.attn(positions, x, None)
+         x, x_scales = self._hoisted_all_reduce(x)
+@@ -1220,40 +1235,28 @@
+         # None on every bf16 path (all decode, and every flag-off run).
+         x_scales: torch.Tensor | None = None
+         aux_hidden_states: list[torch.Tensor] = []
+-        final_aux_recon: torch.Tensor | None = None  # avoid duplicate mhc_post call
++        # Aux layer ids are one-based; layer idx reconstructs layer idx-1.
+         for idx, layer in enumerate(
+             islice(self.layers, self.start_layer, self.end_layer),
+             start=self.start_layer,
+         ):
++            capture_previous = idx in self.aux_hidden_state_layers
+             hidden_states, residual, post_mix, res_mix, x_scales = layer(
+-                hidden_states,
+-                positions,
+-                input_ids,
+-                post_mix,
+-                res_mix,
+-                residual,
++                hidden_states, positions, input_ids, post_mix, res_mix, residual,
+                 x_scales,
+-            )
+-            if idx + 1 in self.aux_hidden_state_layers:
+-                # Reconstruct the aux hidden state for draft models
+-                aux_recon = mhc_post_tilelang(
+-                    hidden_states, residual, post_mix, res_mix, x_scales=x_scales
+-                )
+-                aux_hidden_states.append(aux_recon.mean(dim=1))
+-                final_aux_recon = aux_recon
++                previous_aux=aux_hidden_states if capture_previous else None,
++            )
+         if layer is not None:
+-            # Reuse if the last layer was captured as an aux hidden state
++            hidden_states = mhc_post_tilelang(
++                hidden_states, residual, post_mix, res_mix, x_scales=x_scales
++            )
+             if self.end_layer in self.aux_hidden_state_layers:
+-                hidden_states = final_aux_recon
+-            else:
+-                hidden_states = mhc_post_tilelang(
+-                    hidden_states, residual, post_mix, res_mix, x_scales=x_scales
+-                )
++                aux_hidden_states.append(hidden_states.mean(dim=1))
+ 
+         if not get_pp_group().is_last_rank:
+             return IntermediateTensors({"hidden_states": hidden_states})
+ 
+-        if self._mtp_hidden_buffer is not None:
++        if self._mtp_hidden_buffer is not None and not aux_hidden_states:
+             num_tokens = hidden_states.shape[0]
+             self._mtp_hidden_buffer[:num_tokens].copy_(hidden_states.flatten(1))
+ 
+@@ -1429,11 +1432,7 @@
+             return
+         layer = self.layers[self.start_layer]
+         if isinstance(layer, DeepseekV4DecoderLayer):
+-            layer.hc_attn_fn_broadcast = (
+-                layer.hc_attn_fn.detach()
+-                .view(-1, layer.hc_mult, layer.hidden_size)
+-                .sum(dim=1)
+-            )
++            layer.finalize_mhc_broadcast_weight()
+ 
+ 
+ def _make_deepseek_v4_weights_mapper(expert_dtype: str) -> WeightsMapper:
+
+--- a/vllm/parser/abstract_parser.py
++++ b/vllm/parser/abstract_parser.py
+@@ -8,7 +8,7 @@
+ from dataclasses import dataclass, field
+ from functools import cached_property
+ 
+-from openai.types.responses import ToolChoiceFunction
++from openai.types.responses import ToolChoiceCustom, ToolChoiceFunction
+ from pydantic import TypeAdapter, ValidationError
+ 
+ from vllm.entrypoints.chat_utils import (
+@@ -394,7 +394,9 @@
+     def _get_function_name(
+         self, request: ChatCompletionRequest | ResponsesRequest
+     ) -> str:
+-        if request.tool_choice and isinstance(request.tool_choice, ToolChoiceFunction):
++        if request.tool_choice and isinstance(
++            request.tool_choice, (ToolChoiceFunction, ToolChoiceCustom)
++        ):
+             return request.tool_choice.name
+         if request.tool_choice and isinstance(
+             request.tool_choice, ChatCompletionNamedToolChoiceParam
+@@ -433,7 +435,7 @@
+         supports_required_and_named = tool_parser.supports_required_and_named
+         is_named_tool_choice = request.tool_choice and isinstance(
+             request.tool_choice,
+-            (ToolChoiceFunction, ChatCompletionNamedToolChoiceParam),
++            (ToolChoiceFunction, ToolChoiceCustom, ChatCompletionNamedToolChoiceParam),
+         )
+         is_required_tool_choice = request.tool_choice == "required"
+         is_auto_tool_choice = enable_auto_tools and (
+@@ -534,7 +536,11 @@
+             or request.tool_choice == "required"
+             or isinstance(
+                 request.tool_choice,
+-                (ChatCompletionNamedToolChoiceParam, ToolChoiceFunction),
++                (
++                    ChatCompletionNamedToolChoiceParam,
++                    ToolChoiceFunction,
++                    ToolChoiceCustom,
++                ),
+             )
+         )
+         if not need_tool_calling:
+@@ -683,7 +689,11 @@
+             and request.tool_choice
+             and isinstance(
+                 request.tool_choice,
+-                (ToolChoiceFunction, ChatCompletionNamedToolChoiceParam),
++                (
++                    ToolChoiceFunction,
++                    ToolChoiceCustom,
++                    ChatCompletionNamedToolChoiceParam,
++                ),
+             )
+         ):
+             delta_message, function_name_returned = extract_named_tool_call_streaming(
+
+--- a/vllm/parser/deepseek_v4.py
++++ b/vllm/parser/deepseek_v4.py
+@@ -268,11 +268,36 @@
+             ParserState.FOREIGN_BLOCK: EventType.TEXT_CHUNK,
+         },
+         arg_converter=_dsml_arg_converter,
+-        arg_structural_chars=frozenset(">"),
+         strip_content_whitespace_with_tools=False,
++        content_tool_separator="\n\n",
+         tool_args_json=False,
+         validate_tool_names=True,
+     )
++
++
++_DSML_TAG_PREFIXES = (
++    "<think>", "</think>", "<｜DSML｜tool_calls>", "</｜DSML｜tool_calls>",
++    "<｜DSML｜function_calls>", "</｜DSML｜function_calls>",
++    "<｜DSML｜invoke", "</｜DSML｜invoke>",
++    "<｜DSML｜parameter", "</｜DSML｜parameter>",
++)
++
++
++def _is_open_json_string(json_str: str) -> bool:
++    in_string = escape = False
++    for char in json_str:
++        if escape:
++            escape = False
++        elif char == "\\":
++            escape = True
++        elif char == '"':
++            in_string = not in_string
++    return in_string
++
++
++def _has_pending_tag(text: str) -> bool:
++    last_angle = text.rfind("<")
++    return last_angle >= 0 and any(tag.startswith(text[last_angle:]) for tag in _DSML_TAG_PREFIXES)
+ 
+ 
+ class DeepSeekV4Parser(ParserEngine):
+@@ -305,3 +330,49 @@
+             return result
+         func_name = next((s.name for s in self._tool_slots if s.args == raw_args), None)
+         return _unwrap_wrapper_args(result, self._tools, func_name)
++
++    def _compute_arg_delta(self, idx: int, raw_delta: str) -> str | None:
++        slot = self._tool_slots[idx]
++
++        # Fast path: if currently streaming an open, schema-stable string parameter
++        # and raw_delta contains no tag delimiters ('<'), directly append the
++        # JSON-escaped chunk without full re-conversion.
++        if (
++            slot.active_string_param is not None
++            and slot.in_open_string
++            and "<" not in raw_delta
++        ):
++            escaped_delta = json.dumps(raw_delta, ensure_ascii=False)[1:-1]
++            slot.streamed_json += escaped_delta
++            return escaped_delta
++
++        diff = super()._compute_arg_delta(idx, raw_delta)
++
++        # Update active_string_param and in_open_string state
++        last_end = 0
++        for m in _PARAM_RE.finditer(slot.args):
++            last_end = m.end()
++        pm = _PARTIAL_PARAM_RE.search(slot.args, last_end)
++        if (
++            pm
++            and pm.group(2) == "true"
++            and not _has_pending_tag(slot.args[pm.start(3) :])
++        ):
++            slot.active_string_param = pm.group(1)
++            is_schema_stable = (
++                slot.string_keys is None or slot.active_string_param in slot.string_keys
++            )
++            slot.in_open_string = is_schema_stable and _is_open_json_string(
++                slot.streamed_json
++            )
++        else:
++            slot.active_string_param = None
++            slot.in_open_string = False
++
++        return diff
++
++    def _flush_arg_converter(self, idx: int) -> str | None:
++        if idx < len(self._tool_slots):
++            self._tool_slots[idx].active_string_param = None
++            self._tool_slots[idx].in_open_string = False
++        return super()._flush_arg_converter(idx)
+
+--- a/vllm/parser/engine/parser_engine.py
++++ b/vllm/parser/engine/parser_engine.py
+@@ -55,6 +55,8 @@
+         "name_sent",
+         "string_keys",
+         "streamed_json",
++        "active_string_param",
++        "in_open_string",
+     )
+ 
+     def __init__(self) -> None:
+@@ -65,6 +67,8 @@
+         self.name_sent: bool = False
+         self.string_keys: set[str] | None = None
+         self.streamed_json: str = ""
++        self.active_string_param: str | None = None
++        self.in_open_string: bool = False
+ 
+     @property
+     def args(self) -> str:
+@@ -130,6 +134,7 @@
+         self._deferred_content: str = ""
+         self._deferred_reasoning: str = ""
+         self._content_has_nonws: bool = False
++        self._held_content_sep: str = ""
+         self._suppress_tool_calls: bool = False
+ 
+         self._arg_converter = parser_engine_config.arg_converter
+@@ -144,6 +149,7 @@
+         self._strip_content_ws_with_tools = (
+             parser_engine_config.strip_content_whitespace_with_tools
+         )
++        self._content_tool_sep = parser_engine_config.content_tool_separator
+ 
+         vocab = self.vocab
+         self._reasoning_start_token_id: int | None = None
+@@ -196,7 +202,7 @@
+ 
+     def finish_streaming(self) -> DeltaMessage | None:
+         events = self._engine.finish()
+-        if events or self._deferred_content:
++        if events or self._deferred_content or self._held_content_sep:
+             return self._events_to_delta(events, finished=True)
+         return None
+ 
+@@ -207,6 +213,7 @@
+         self._deferred_content = ""
+         self._deferred_reasoning = ""
+         self._content_has_nonws = False
++        self._held_content_sep = ""
+         self._prompt_streaming_prepared = False
+ 
+     def adjust_request(
+@@ -300,6 +307,7 @@
+         the closing tag arrives.
+         """
+         last_colon = -1
++        last_comma = -1
+         last_key: str | None = None
+         pending_key: str | None = None
+         in_string = False
+@@ -329,27 +337,50 @@
+                 last_colon = i
+                 last_key = pending_key
+                 pending_key = None
++            elif c == "," and depth == 1:
++                last_comma = i
+         if last_colon < 0:
+             return ""
+         end = last_colon + 1
+         while end < len(json_str) and json_str[end] in (" ", "\t", "\n", "\r"):
+             end += 1
+-        if end >= len(json_str) or json_str[end] != '"':
+-            return json_str[:end]
+-        if string_keys is not None and last_key not in string_keys:
+-            return json_str[:end]
++        if (
++            end >= len(json_str)
++            or json_str[end] != '"'
++            or (string_keys is not None and last_key not in string_keys)
++        ):
++            # The trailing value cannot stream. Stop after the last complete
++            # top-level value rather than after ``"key": ``: the flush can
++            # drop an unfinished parameter, and a prefix that ends on the
++            # separator then has no valid completion.
++            return json_str[:last_comma] if last_comma >= 0 else ""
+ 
+         escape = False
++        escape_start = -1
++        hex_left = 0
+         for i in range(end + 1, len(json_str)):
+             c = json_str[i]
++            if hex_left:
++                hex_left -= 1
++                if hex_left == 0:
++                    escape_start = -1
++                continue
+             if escape:
+                 escape = False
++                if c == "u":
++                    hex_left = 4
++                else:
++                    escape_start = -1
+                 continue
+             if c == "\\":
+                 escape = True
++                escape_start = i
+                 continue
+             if c == '"':
+                 return json_str[:i]
++        if escape_start >= 0:
++            # Never end on a partial escape: ``\u12`` has no valid completion.
++            return json_str[:escape_start]
+         return json_str
+ 
+     @staticmethod
+@@ -443,11 +474,44 @@
+         tools_called: bool,
+     ) -> str | None:
+         if tools_called:
++            sep = self._content_tool_sep
++            if sep and content.endswith(sep):
++                content = content[: -len(sep)]
+             if self._strip_content_ws_with_tools:
+                 content = content.strip()
+             elif self._drop_ws_only_content_before_tools and not content.strip():
+                 content = ""
+         return content or None
++
++    def _hold_content_tool_separator(
++        self,
++        content_str: str,
++        tool_follows: bool,
++        finished: bool,
++    ) -> str:
++        """Withhold a trailing (partial) content/tool separator until we know
++        whether a tool-call block follows it.
++
++        Mirrors the reference DeepSeek parser, which treats the separator as
++        part of the tool-call opener: when a tool call follows, exactly one
++        trailing separator is dropped; when more text follows or the turn
++        ends without a tool call, the withheld text is released unchanged.
++        """
++        sep = self._content_tool_sep
++        assert sep
++        content_str = self._held_content_sep + content_str
++        self._held_content_sep = ""
++        if tool_follows:
++            if content_str.endswith(sep):
++                content_str = content_str[: -len(sep)]
++            return content_str
++        if finished:
++            return content_str
++        for k in range(min(len(sep), len(content_str)), 0, -1):
++            if content_str.endswith(sep[:k]):
++                self._held_content_sep = content_str[-k:]
++                return content_str[:-k]
++        return content_str
+ 
+     # ── Streaming: parse_delta ────────────────────────────────────────
+ 
+@@ -766,7 +830,11 @@
+         events: list[SemanticEvent],
+         finished: bool = False,
+     ) -> DeltaMessage | None:
+-        if not events and not self._deferred_content:
++        if (
++            not events
++            and not self._deferred_content
++            and not (finished and self._held_content_sep)
++        ):
+             return None
+ 
+         tool_call_deltas: list[DeltaToolCall] = []
+@@ -827,6 +895,13 @@
+                 self._deferred_content = content_str
+                 content_str = ""
+ 
++        if self._content_tool_sep and (
++            self._content_has_nonws or self._held_content_sep
++        ):
++            content_str = self._hold_content_tool_separator(
++                content_str, seen_tool_event, finished
++            )
++
+         content = content_str or None
+         reasoning = "".join(reasoning_parts) or None
+ 
+@@ -1048,11 +1123,83 @@
+         prev = slot.streamed_json
+         if final_json and len(final_json) > len(prev):
+             if prev and not final_json.startswith(prev):
+-                return None
++                return self._close_streamed_json(slot, prev)
+             diff = final_json[len(prev) :]
+             slot.streamed_json = final_json
+             return diff
++        if prev:
++            return self._close_streamed_json(slot, prev)
+         return None
++
++    def _close_streamed_json(self, slot: ToolCallSlot, prev: str) -> str | None:
++        """Terminate an argument prefix the flush cannot extend.
++
++        ``_safe_arg_prefix`` deliberately streams unterminated string values for
++        prefix-stable keys, on the understanding that the flush completes them.
++        If the model never closes a parameter, the non-partial re-derivation
++        drops that parameter entirely, so it is neither longer than nor a prefix
++        of what was already sent. Returning ``None`` there ends the stream with
++        ``finish_reason`` set while the client holds a half-written string, which
++        no JSON parser accepts. Close what was already sent instead: the client
++        gets the truncated value rather than an unparsable message.
++        """
++        suffix = self._json_prefix_terminator(prev)
++        if not suffix:
++            return None
++        slot.streamed_json = prev + suffix
++        return suffix
++
++    @staticmethod
++    def _json_prefix_terminator(prefix: str) -> str:
++        """Return the shortest suffix that makes ``prefix`` parse, or ``""``."""
++        in_string = False
++        escape = False
++        stack: list[str] = []
++        for c in prefix:
++            if escape:
++                escape = False
++                continue
++            if in_string:
++                if c == "\\":
++                    escape = True
++                elif c == '"':
++                    in_string = False
++                continue
++            if c == '"':
++                in_string = True
++            elif c == "{":
++                stack.append("}")
++            elif c == "[":
++                stack.append("]")
++            elif c in "}]" and stack:
++                stack.pop()
++        suffix = ""
++        if escape:
++            # A trailing escape would swallow the quote that closes the string.
++            suffix += "\\"
++        if in_string:
++            suffix += '"'
++        else:
++            # A dangling separator has no value to close. ``null`` is used
++            # purely to make the prefix PARSE: the client is being handed a
++            # truncated call either way, and a null placeholder may still fail
++            # the tool's schema, which is strictly better than arguments no
++            # JSON parser accepts. An object cannot be completed after a comma
++            # without inventing a key, so that case falls through to the parse
++            # check below and yields no suffix.
++            tail = prefix.rstrip()
++            if tail.endswith(":") or (
++                tail.endswith(",") and stack and stack[-1] == "]"
++            ):
++                suffix += "null"
++        suffix += "".join(reversed(stack))
++        if not suffix:
++            return ""
++        try:
++            json.loads(prefix + suffix)
++        except (json.JSONDecodeError, ValueError):
++            return ""
++        return suffix
+ 
+     _NAME_RE = re.compile(r'"name"\s*:\s*"([^"]*)"')
+ 
+
+--- a/vllm/parser/engine/parser_engine_config.py
++++ b/vllm/parser/engine/parser_engine_config.py
+@@ -105,6 +105,12 @@
+     # .strip() content text when tool calls are present.
+     strip_content_whitespace_with_tools: bool = True
+ 
++    # Text the chat template emits between visible content and a tool-call
++    # block (e.g. "\n\n" for DeepSeek DSML). When a tool call follows, exactly
++    # one trailing occurrence is removed from the content so that the turn
++    # re-renders byte-identically when the client echoes it back as history.
++    content_tool_separator: str | None = None
++
+     # Reject tool calls whose names are absent from the request tools.
+     validate_tool_names: bool = False
+ 
+
+--- a/vllm/renderers/deepseek_v4.py
++++ b/vllm/renderers/deepseek_v4.py
+@@ -2,6 +2,7 @@
+ # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+ 
+ import copy
++from typing import cast
+ 
+ from vllm.config import VllmConfig
+ from vllm.entrypoints.chat_utils import (
+@@ -18,6 +19,32 @@
+ from .inputs import DictPrompt
+ from .inputs.preprocess import parse_dec_only_prompt
+ from .params import ChatParams
++
++_TOOL_TEXT_SEPARATOR = "\n\n"
++
++
++def _join_tool_text_parts(
++    messages: list[ChatCompletionMessageParam],
++) -> list[ChatCompletionMessageParam]:
++    """Preserve DeepSeek V4 encoder spacing for multipart tool results."""
++    out: list[ChatCompletionMessageParam] = []
++    for message in messages:
++        content = message.get("content")
++        if (
++            message.get("role") == "tool"
++            and isinstance(content, list)
++            and content
++            and all(
++                isinstance(part, dict) and part.get("type") == "text"
++                for part in content
++            )
++        ):
++            joined = _TOOL_TEXT_SEPARATOR.join(
++                cast(dict, part).get("text", "") for part in content
++            )
++            message = cast(ChatCompletionMessageParam, {**message, "content": joined})
++        out.append(message)
++    return out
+ 
+ 
+ class DeepseekV4Renderer(BaseRenderer[DeepseekV4Tokenizer]):
+@@ -47,10 +74,11 @@
+         messages: list[ChatCompletionMessageParam],
+         params: ChatParams,
+     ) -> tuple[list[ConversationMessage], DictPrompt]:
++        messages = _join_tool_text_parts(messages)
+         conversation, mm_data, mm_uuids = parse_chat_messages(
+             messages,
+             self.model_config,
+-            content_format="string",
++            content_format="openai",
+             media_io_kwargs=params.media_io_kwargs,
+             mm_processor_kwargs=params.mm_processor_kwargs,
+         )
+@@ -74,10 +102,11 @@
+         messages: list[ChatCompletionMessageParam],
+         params: ChatParams,
+     ) -> tuple[list[ConversationMessage], DictPrompt]:
++        messages = _join_tool_text_parts(messages)
+         conversation, mm_data, mm_uuids = await parse_chat_messages_async(
+             messages,
+             self.model_config,
+-            content_format="string",
++            content_format="openai",
+             media_io_kwargs=params.media_io_kwargs,
+             mm_processor_kwargs=params.mm_processor_kwargs,
+         )
+
+--- a/vllm/tokenizers/deepseek_v4.py
++++ b/vllm/tokenizers/deepseek_v4.py
+@@ -21,6 +21,10 @@
+     added_vocab = tokenizer.get_added_vocab()
+ 
+     class _DeepseekV4Tokenizer(tokenizer.__class__):  # type: ignore
++        # ``encode_messages`` renders ``role: system`` at any index and appends
++        # the assistant header after a trailing system message.
++        supports_inline_system_messages = True
++
+         def apply_chat_template(
+             self,
+             messages: list["ChatCompletionMessageParam"],
+@@ -35,8 +39,22 @@
+             conversation = kwargs.get("conversation", messages)
+             messages = conversation.copy()
+             if tools is not None and len(tools) > 0:
+-                messages.insert(0, {"role": "system"})
+-                messages[0]["tools"] = tools  # type: ignore[typeddict-unknown-key]
++                # Request tools follow the first system/developer content.
++                # Synthesize a system entry only when neither role exists.
++                tools_idx = next(
++                    (
++                        i
++                        for i, m in enumerate(messages)
++                        if m.get("role") in ("system", "developer")
++                    ),
++                    None,
++                )
++                if tools_idx is None:
++                    messages.insert(0, {"role": "system"})
++                    tools_idx = 0
++                else:
++                    messages[tools_idx] = copy.copy(messages[tools_idx])
++                messages[tools_idx]["tools"] = tools  # type: ignore[typeddict-unknown-key]
+ 
+             reasoning_effort = kwargs.get("reasoning_effort")
+             if not isinstance(reasoning_effort, str):
+@@ -53,6 +71,8 @@
+                 thinking_mode=thinking_mode,
+                 drop_thinking=kwargs.get("drop_thinking", True),
+                 reasoning_effort=reasoning_effort,
++                add_generation_prompt=kwargs.get("add_generation_prompt", True),
++                continue_final_message=kwargs.get("continue_final_message", False),
+             )
+ 
+             prompt_str = encode_messages(messages, **encode_config)  # type: ignore
+
+--- a/vllm/tokenizers/deepseek_v4_encoding.py
++++ b/vllm/tokenizers/deepseek_v4_encoding.py
+@@ -215,10 +215,18 @@
+             raise ValueError(
+                 f"Unsupported content block type: {block.get('type')!r}"
+             )
+-    return "".join(parts)
+-
+-
+-def render_message(index: int, messages: List[Dict[str, Any]], thinking_mode: str, drop_thinking: bool = True, reasoning_effort: Optional[str] = None) -> str:
++    return "\n\n".join(parts)
++
++
++def render_message(
++    index: int,
++    messages: List[Dict[str, Any]],
++    thinking_mode: str,
++    drop_thinking: bool = True,
++    reasoning_effort: Optional[str] = None,
++    add_generation_prompt: bool = True,
++    continue_final_message: bool = False,
++) -> str:
+     """
+     Render a single message at the given index into its encoded string form.
+ 
+@@ -247,12 +255,14 @@
+     last_user_idx = find_last_user_index(messages)
+ 
+     role = msg.get("role")
+-    content = msg.get("content")
++    content = flatten_content_blocks(msg.get("content"))
+     tools = msg.get("tools")
+     response_format = msg.get("response_format")
+     tool_calls = msg.get("tool_calls")
+     reasoning = msg.get("reasoning")
+-    wo_eos = msg.get("wo_eos", False)
++    wo_eos = msg.get("wo_eos", False) or (
++        continue_final_message and index == len(messages) - 1
++    )
+ 
+     if tools:
+         tools = tools_from_openai_format(tools)
+@@ -314,7 +324,7 @@
+                     parts.append(f"[Unsupported {block_type}]")
+             prompt += "\n\n".join(parts)
+         else:
+-            prompt += flatten_content_blocks(content) or ""
++            prompt += content or ""
+ 
+     elif role == "latest_reminder":
+         prompt += LATEST_REMINDER_SP_TOKEN + latest_reminder_msg_template.format(content=content)
+@@ -399,16 +409,20 @@
+             or messages[index + 1].get("role") == "assistant"
+         )
+     ):
+-        # For user/developer this token is both the inter-turn separator and the
+-        # generation prompt. A system followed by `latest_reminder` deliberately
+-        # does not match: that reminder owns the final assistant transition.
++        # This token separates historical turns and opens a new generation.
++        # A trailing system followed by latest_reminder does not match here.
++        if index + 1 != len(messages) or add_generation_prompt:
++            prompt += ASSISTANT_SP_TOKEN
++            if not drop_thinking and thinking_mode == "thinking":
++                prompt += thinking_start_token
++            elif drop_thinking and thinking_mode == "thinking" and index >= last_user_idx:
++                prompt += thinking_start_token
++            else:
++                prompt += thinking_end_token
++
++    elif add_generation_prompt and index + 1 == len(messages) and role == "assistant":
+         prompt += ASSISTANT_SP_TOKEN
+-        if not drop_thinking and thinking_mode == "thinking":
+-            prompt += thinking_start_token
+-        elif drop_thinking and thinking_mode == "thinking" and index >= last_user_idx:
+-            prompt += thinking_start_token
+-        else:
+-            prompt += thinking_end_token
++        prompt += thinking_start_token if thinking_mode == "thinking" else thinking_end_token
+ 
+     return prompt
+ 
+@@ -531,6 +545,8 @@
+     drop_thinking: bool = True,
+     add_default_bos_token: bool = True,
+     reasoning_effort: Optional[str] = None,
++    add_generation_prompt: bool = True,
++    continue_final_message: bool = False,
+ ) -> str:
+     """
+     Encode a list of messages into the DeepSeek-V4 prompt format.
+@@ -553,6 +569,13 @@
+     Returns:
+         The encoded prompt string.
+     """
++    if continue_final_message:
++        add_generation_prompt = False
++    if messages and continue_final_message and messages[-1].get("role") != "assistant":
++        raise ValueError(
++            "Cannot set `continue_final_message`=True when the last message is not from the assistant."
++        )
++
+     context = context if context else []
+ 
+     # Preprocess: merge tool messages and sort tool results
+@@ -588,6 +611,8 @@
+             thinking_mode=thinking_mode,
+             drop_thinking=effective_drop_thinking,
+             reasoning_effort=reasoning_effort,
++            add_generation_prompt=add_generation_prompt,
++            continue_final_message=continue_final_message,
+         )
+ 
+     return prompt
+
+--- a/vllm/tokenizers/protocol.py
++++ b/vllm/tokenizers/protocol.py
+@@ -11,6 +11,15 @@
+ 
+ 
+ class TokenizerLike(Protocol):
++    # Whether ``apply_chat_template`` accepts ``role: system`` messages at any
++    # position of the conversation, not only as the leading message, and still
++    # emits the generation prompt when the conversation ends with one. Encoder
++    # based tokenizers (no jinja chat template) set this so that API adapters
++    # can keep mid-conversation system messages in place instead of merging
++    # them into the leading system block, which breaks prefix caching for
++    # clients that append a system reminder on every turn.
++    supports_inline_system_messages: bool = False
++
+     @classmethod
+     def from_pretrained(
+         cls,
+
+--- a/vllm/tool_parsers/structural_tag_registry.py
++++ b/vllm/tool_parsers/structural_tag_registry.py
+@@ -4,7 +4,7 @@
+ from collections.abc import Callable, Sequence
+ from typing import Any, Literal, TypeAlias
+ 
+-from openai.types.responses import FunctionTool
++from openai.types.responses import CustomTool, FunctionTool, ToolChoiceCustom
+ from openai.types.responses.response import ToolChoice as ResponsesToolChoice
+ from openai.types.responses.tool import Tool as ResponsesTool
+ from openai.types.responses.tool_choice_allowed import ToolChoiceAllowed
+@@ -34,6 +34,7 @@
+     ChatCompletionNamedToolChoiceParam,
+     ChatCompletionToolsParam,
+ )
++from vllm.tool_parsers.utils import custom_tool_description, custom_tool_parameters
+ 
+ ToolChoice: TypeAlias = (
+     Literal["none", "auto", "required"]
+@@ -155,6 +156,11 @@
+         if tool.strict is not None:
+             function["strict"] = tool.strict
+         return {"type": "function", "function": function}
++    if isinstance(tool, CustomTool):
++        function = {"name": tool.name, "parameters": custom_tool_parameters()}
++        if (description := custom_tool_description(tool)) is not None:
++            function["description"] = description
++        return {"type": "function", "function": function}
+     dumped_tool = tool.model_dump(mode="json", exclude_none=True)
+     if isinstance(tool, ChatCompletionToolsParam):
+         return dumped_tool
+@@ -175,7 +181,7 @@
+     if isinstance(tool_choice, ChatCompletionNamedToolChoiceParam):
+         return tool_choice.model_dump(mode="json", exclude_none=True)
+ 
+-    if isinstance(tool_choice, ToolChoiceFunction):
++    if isinstance(tool_choice, (ToolChoiceFunction, ToolChoiceCustom)):
+         return {
+             "type": "function",
+             "function": {"name": tool_choice.name},
+
+--- a/vllm/tool_parsers/utils.py
++++ b/vllm/tool_parsers/utils.py
+@@ -11,11 +11,14 @@
+ 
+ import partial_json_parser
+ from openai.types.responses import (
++    CustomTool,
+     FunctionTool,
+     NamespaceTool,
++    ToolChoiceCustom,
+     ToolChoiceFunction,
+ )
+ from openai.types.responses.tool import Tool as ResponsesTool
++from openai.types.shared.custom_tool_input_format import Grammar as CustomToolGrammar
+ from partial_json_parser.core.options import Allow
+ 
+ from vllm.entrypoints.openai.chat_completion.protocol import (
+@@ -34,6 +37,44 @@
+ 
+ logger = init_logger(__name__)
+ 
++CUSTOM_TOOL_INPUT_KEY = "input"
++
++
++def custom_tool_parameters() -> dict[str, Any]:
++    """Schema of the single-string function shim a ``custom`` tool is shown as."""
++    return {
++        "type": "object",
++        "properties": {
++            CUSTOM_TOOL_INPUT_KEY: {
++                "type": "string",
++                "description": "The freeform text payload for this tool.",
++            }
++        },
++        "required": [CUSTOM_TOOL_INPUT_KEY],
++        "additionalProperties": False,
++    }
++
++
++def custom_tool_description(tool: CustomTool) -> str | None:
++    """Fold a grammar format into the description: the payload is generated
++    inside the model's tool-call envelope, so the grammar cannot be enforced."""
++    parts = [tool.description] if tool.description else []
++    if isinstance(tool.format, CustomToolGrammar):
++        parts.append(
++            f"The payload must conform to this {tool.format.syntax} grammar:\n"
++            f"{tool.format.definition}"
++        )
++    return "\n\n".join(parts) or None
++
++
++def custom_tool_as_function_dict(tool: CustomTool) -> dict[str, Any]:
++    return {
++        "type": "function",
++        "name": tool.name,
++        "description": custom_tool_description(tool),
++        "parameters": custom_tool_parameters(),
++    }
++
+ 
+ def safe_literal_eval(text: str):
+     with warnings.catch_warnings():
+@@ -186,6 +227,8 @@
+ ) -> list[tuple[str, dict[str, Any] | None]]:
+     if isinstance(tool, FunctionTool):
+         return [(tool.name, tool.parameters)]
++    if isinstance(tool, CustomTool):
++        return [(tool.name, custom_tool_parameters())]
+     if not isinstance(tool, NamespaceTool):
+         return []
+ 
+@@ -217,6 +260,8 @@
+                 function_tools.append(tool_dict)
+         elif isinstance(tool, FunctionTool):
+             function_tools.append(tool.model_dump())
++        elif isinstance(tool, CustomTool):
++            function_tools.append(custom_tool_as_function_dict(tool))
+     return function_tools
+ 
+ 
+@@ -254,7 +299,7 @@
+ 
+ 
+ def _is_function_tool(tool: Tool) -> bool:
+-    return isinstance(tool, (FunctionTool, ChatCompletionToolsParam))
++    return isinstance(tool, (FunctionTool, CustomTool, ChatCompletionToolsParam))
+ 
+ 
+ def _extract_tool_info(
+@@ -262,6 +307,8 @@
+ ) -> tuple[str, dict[str, Any] | None]:
+     if isinstance(tool, FunctionTool):
+         return tool.name, tool.parameters
++    elif isinstance(tool, CustomTool):
++        return tool.name, custom_tool_parameters()
+     elif isinstance(tool, ChatCompletionToolsParam):
+         return tool.function.name, tool.function.parameters
+     else:
+@@ -276,7 +323,7 @@
+     if not tools:
+         return {}
+     for tool in tools:
+-        if isinstance(tool, (FunctionTool, NamespaceTool)):
++        if isinstance(tool, (FunctionTool, NamespaceTool, CustomTool)):
+             for name, params in iter_response_function_tool_info(tool):
+                 if name == tool_name:
+                     return (params or {}).get("properties", {})
+@@ -295,7 +342,7 @@
+         return frozenset()
+     names: set[str] = set()
+     for tool in tools:
+-        if isinstance(tool, (FunctionTool, NamespaceTool)):
++        if isinstance(tool, (FunctionTool, NamespaceTool, CustomTool)):
+             for name, _ in iter_response_function_tool_info(tool):
+                 names.add(name)
+             continue
+@@ -314,7 +361,7 @@
+     if not tools:
+         return False
+     for tool in tools:
+-        if isinstance(tool, (FunctionTool, NamespaceTool)):
++        if isinstance(tool, (FunctionTool, NamespaceTool, CustomTool)):
+             for name, _ in iter_response_function_tool_info(tool):
+                 if name == tool_name:
+                     return True
+@@ -370,7 +417,7 @@
+     fn_tool_schemas: list[dict[str, Any]] = []
+     fn_tools: list[Tool] = []
+     for tool in tools:
+-        if isinstance(tool, (FunctionTool, NamespaceTool)):
++        if isinstance(tool, (FunctionTool, NamespaceTool, CustomTool)):
+             fn_tool_schemas.extend(
+                 _get_tool_schema_from_name_and_params(name, params)
+                 for name, params in iter_response_function_tool_info(tool)
+@@ -395,7 +442,9 @@
+ 
+ 
+ def get_json_schema_from_tools(
+-    tool_choice: str | ToolChoiceFunction | ChatCompletionNamedToolChoiceParam,
++    tool_choice: (
++        str | ToolChoiceFunction | ToolChoiceCustom | ChatCompletionNamedToolChoiceParam
++    ),
+     tools: list[Tool] | None,
+ ) -> str | dict | None:
+     # tool_choice: "none"
+@@ -403,12 +452,12 @@
+         return None
+     # tool_choice: Forced Function (Responses)
+     if (not isinstance(tool_choice, str)) and isinstance(
+-        tool_choice, ToolChoiceFunction
++        tool_choice, (ToolChoiceFunction, ToolChoiceCustom)
+     ):
+         tool_name = tool_choice.name
+         responses_tool_map: dict[str, dict[str, Any] | None] = {}
+         for tool in tools:
+-            if not isinstance(tool, (FunctionTool, NamespaceTool)):
++            if not isinstance(tool, (FunctionTool, NamespaceTool, CustomTool)):
+                 continue
+             for name, params in iter_response_function_tool_info(tool):
+                 responses_tool_map[name] = params
+
+--- a/vllm/v1/attention/backends/mla/indexer.py
++++ b/vllm/v1/attention/backends/mla/indexer.py
+@@ -1038,7 +1038,6 @@
+         assert num_decode_tokens + num_prefill_tokens == num_tokens
+ 
+         compressed_slot_mapping = slot_mapping
+-        compressed_seq_lens = seq_lens
+         if self.compress_ratio > 1:
+             padded_num_tokens = num_tokens
+             if self.pcp_world_size > 1:
+@@ -1057,10 +1056,12 @@
+                     self.compressed_slot_mapping_buffer[:padded_num_tokens],
+                     dim=0,
+                 )
+-            compressed_seq_lens = seq_lens // self.compress_ratio
+ 
+         prefill_metadata = None
+         if num_prefills > 0:
++            compressed_seq_lens = (
++                seq_lens // self.compress_ratio if self.compress_ratio > 1 else seq_lens
++            )
+             # This CPU value is an upper bound for async-spec extend rows.  It
+             # is safe for chunking/allocation because CUDA metadata below is
+             # built from exact device seq_lens and gather ignores the tail.
+
+--- a/vllm/v1/attention/backends/mla/sparse_swa.py
++++ b/vllm/v1/attention/backends/mla/sparse_swa.py
+@@ -573,7 +573,7 @@
+         )
+ 
+         is_valid_token = self.is_valid_token[: slot_mapping.shape[0]]
+-        is_valid_token.copy_(slot_mapping >= 0)
++        torch.ge(slot_mapping, 0, out=is_valid_token)
+ 
+         non_causal = not common_attn_metadata.causal
+         decode_swa_width = (
+
+--- a/vllm/v1/structured_output/backend_xgrammar.py
++++ b/vllm/v1/structured_output/backend_xgrammar.py
+@@ -152,11 +152,12 @@
+     def accept_tokens(self, request_id: str, tokens: list[int]) -> bool:
+         """Accepts a list of tokens and advances the FSM.
+ 
+-        Returns True if the FSM was advanced successfully.
+-        Returns False if the FSM failed to advance.
++        Returns True if all grammar-constrained tokens were accepted.
++        Tokens after termination are ignored. Returns False if the FSM
++        failed to advance.
+         """
+         if self._is_terminated:
+-            return False
++            return True
+         for token in tokens:
+             if not self.matcher.accept_token(token):
+                 # Expected under spec decode when reasoning ends mid-window:
+@@ -172,7 +173,9 @@
+                 )
+                 return False
+             self.num_processed_tokens += 1
+-        self._is_terminated = self.matcher.is_terminated()
++            self._is_terminated = self.matcher.is_terminated()
++            if self._is_terminated:
++                break
+         return True
+ 
+     def validate_tokens(self, tokens: list[int]) -> list[int]:
+@@ -181,10 +184,15 @@
+ 
+         Returns the prefix list of tokens that are accepted by the FSM.
+         """
++        if self._is_terminated:
++            return []
++
+         accepted_tokens = []
+         for token in tokens:
+             if self.matcher.accept_token(token):
+                 accepted_tokens.append(token)
++                if self.matcher.is_terminated():
++                    break
+             else:
+                 break
+         if len(accepted_tokens) > 0:
+@@ -204,8 +212,9 @@
+         return self._is_terminated
+ 
+     def reset(self):
++        self.matcher.reset()
+         self.num_processed_tokens = 0
+-        self.matcher.reset()
++        self._is_terminated = False
+ 
+ 
+ # cf https://github.com/mlc-ai/xgrammar/blob/a32ac892676d2eedc0327416105b9b06edfb94b2/cpp/json_schema_converter.cc
+
+--- a/vllm/v1/worker/gpu/model_runner.py
++++ b/vllm/v1/worker/gpu/model_runner.py
+@@ -669,7 +669,7 @@
+             # target returns a persistent buffer sized at max_num_batched_tokens;
+             # slice to the active token count that propose() expects.
+             spec_hidden_states = hidden_states
+-            if hasattr(self.model, "get_mtp_target_hidden_states"):
++            if not aux_hidden_states and hasattr(self.model, "get_mtp_target_hidden_states"):
+                 pre_hc_hidden_states = self.model.get_mtp_target_hidden_states()
+                 spec_hidden_states = pre_hc_hidden_states[: hidden_states.shape[0]]  # type: ignore[union-attr]
+             with use_workspace_lane(self._draft_workspace_lane):
+@@ -1600,7 +1600,7 @@
+             # target returns a persistent buffer sized at max_num_batched_tokens;
+             # slice to the active token count that propose() expects.
+             spec_hidden_states = hidden_states
+-            if hasattr(self.model, "get_mtp_target_hidden_states"):
++            if not aux_hidden_states and hasattr(self.model, "get_mtp_target_hidden_states"):
+                 pre_hc_hidden_states = self.model.get_mtp_target_hidden_states()
+                 spec_hidden_states = pre_hc_hidden_states[: hidden_states.shape[0]]  # type: ignore[union-attr]
+             with use_workspace_lane(self._draft_workspace_lane):
+
+--- /dev/null
++++ b/vllm/v1/worker/gpu/sample/greedy_argmax.py
+@@ -0,0 +1,67 @@
++# SPDX-License-Identifier: Apache-2.0
++# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
++import torch
++
++from vllm.triton_utils import tl, triton
++
++
++@triton.jit
++def _argmax_pair(av, ai, bv, bi):
++    an, bn = av != av, bv != bv
++    take_a = (an & ~bn) | ((an == bn) & ((av > bv) | (((av == bv) | an) & (ai < bi))))
++    return tl.where(take_a, av, bv), tl.where(take_a, ai, bi)
++
++
++@triton.jit
++def _argmax_partial(
++    X,
++    PV,
++    PI,
++    N: tl.constexpr,
++    SX: tl.constexpr,
++    SPLITS: tl.constexpr,
++    BLOCK: tl.constexpr,
++):
++    row, part = tl.program_id(0), tl.program_id(1)
++    col = part * BLOCK + tl.arange(0, BLOCK)
++    value = tl.load(X + row.to(tl.int64) * SX + col, col < N, float("-inf"))
++    index = tl.where(col < N, col, N)
++    value, index = tl.reduce((value.to(tl.float32), index), 0, _argmax_pair)
++    tl.store(PV + row * SPLITS + part, value)
++    tl.store(PI + row * SPLITS + part, index)
++
++
++@triton.jit
++def _argmax_finish(PV, PI, OUT, SPLITS: tl.constexpr, BLOCK: tl.constexpr):
++    row = tl.program_id(0)
++    col = tl.arange(0, BLOCK)
++    value = tl.load(PV + row * SPLITS + col, col < SPLITS, float("-inf"))
++    index = tl.load(PI + row * SPLITS + col, col < SPLITS, 0x7FFFFFFF)
++    _, index = tl.reduce((value, index), 0, _argmax_pair)
++    tl.store(OUT + row, index.to(tl.int64))
++
++
++def greedy_argmax(logits: torch.Tensor) -> torch.Tensor:
++    if (
++        not logits.is_cuda
++        or logits.dtype not in (torch.bfloat16, torch.float32)
++        or logits.ndim != 2
++        or logits.stride(1) != 1
++        or logits.shape[1] < 4096
++    ):
++        return logits.argmax(dim=-1)
++    rows, vocab = logits.shape
++    out = torch.empty(rows, dtype=torch.int64, device=logits.device)
++    if rows == 0:
++        return out
++    block = 4096
++    splits = triton.cdiv(vocab, block)
++    values = torch.empty((rows, splits), dtype=torch.float32, device=logits.device)
++    indices = torch.empty((rows, splits), dtype=torch.int32, device=logits.device)
++    _argmax_partial[(rows, splits)](
++        logits, values, indices, vocab, logits.stride(0), splits, block, num_warps=4
++    )
++    _argmax_finish[(rows,)](
++        values, indices, out, splits, triton.next_power_of_2(splits), num_warps=1
++    )
++    return out
+
+--- a/vllm/v1/worker/gpu/spec_decode/dspark/speculator.py
++++ b/vllm/v1/worker/gpu/spec_decode/dspark/speculator.py
+@@ -31,6 +31,7 @@
+ from vllm.config import VllmConfig
+ from vllm.config.compilation import CUDAGraphMode
+ from vllm.logger import init_logger
++from vllm.v1.worker.gpu.sample.greedy_argmax import greedy_argmax
+ from vllm.v1.utils import record_function_or_nullcontext
+ from vllm.v1.worker.gpu.sample.gumbel import gumbel_sample
+ from vllm.v1.worker.gpu.spec_decode.dflash.speculator import DFlashSpeculator
+@@ -201,7 +202,7 @@
+                 )
+             else:
+                 draft_sampled_i = self.model.map_draft_to_target(
+-                    logits_i.argmax(dim=-1)
++                    greedy_argmax(logits_i)
+                 )
+             self.draft_tokens[:num_reqs, i] = draft_sampled_i
+             prev = draft_sampled_i

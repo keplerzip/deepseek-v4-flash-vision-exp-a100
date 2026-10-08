@@ -1,15 +1,15 @@
-"""R3.4 single service contract; model path is a read-only mount."""
+"""R3.9 single service contract; model path is a read-only mount."""
 import json
 import os
 from pathlib import Path
 import sys
 
-EXPECTED = {'decoding': 'dspark', 'enforce_eager': False, 'gpu_memory_utilization': 0.92, 'model': '/model', 'served_model_name': 'DeepSeek-V4-Flash', 'max_model_len': 262144, 'max_num_seqs': 32, 'tensor_parallel_size': 8, 'max_num_batched_tokens': 4096, 'kv_cache_dtype': 'fp8', 'block_size': 256, 'limit_mm_per_prompt': {'image': 999}, 'mm_processor_cache_gb': 0, 'enable_prefix_caching': True, 'disable_chunked_mm_input': True, 'speculative_config': {'method': 'dspark', 'num_speculative_tokens': 6, 'draft_sample_method': 'greedy', 'max_model_len': 262144}, 'dtype': 'bfloat16', 'mm_encoder_attn_backend': 'TORCH_SDPA', 'prefix_caching_hash_algo': 'sha256', 'release': 'R3.4'}
+EXPECTED = {'decoding': 'dspark', 'enforce_eager': False, 'gpu_memory_utilization': 0.92, 'model': '/model', 'served_model_name': 'DeepSeek-V4-Flash', 'max_model_len': 1048576, 'max_num_seqs': 32, 'tensor_parallel_size': 8, 'max_num_batched_tokens': 4096, 'kv_cache_dtype': 'fp8', 'block_size': 256, 'limit_mm_per_prompt': {'image': 999}, 'mm_processor_cache_gb': 0, 'enable_prefix_caching': True, 'disable_chunked_mm_input': True, 'speculative_config': {'method': 'dspark', 'num_speculative_tokens': 6, 'draft_sample_method': 'greedy', 'max_model_len': 1048576}, 'dtype': 'bfloat16', 'mm_encoder_attn_backend': 'TORCH_SDPA', 'prefix_caching_hash_algo': 'sha256', 'release': 'R3.9'}
 
 def settings():
     cfg = json.loads((Path(__file__).resolve().parents[1] / 'config/service.json').read_text())
     if cfg != EXPECTED:
-        raise ValueError('R3.4 fixed service configuration changed; restore config/service.json')
+        raise ValueError('R3.9 fixed service configuration changed; restore config/service.json')
     # Runner/graph decorators must read these values before vLLM import.
     os.environ['VLLM_USE_V2_MODEL_RUNNER'] = '1'
     os.environ['VLLM_USE_BREAKABLE_CUDAGRAPH'] = '1'
@@ -73,10 +73,10 @@ def arguments(cfg):
 
 if __name__ == '__main__':
     if sys.argv[1:] not in ([], ['--print']):
-        raise SystemExit('Usage: engine.py [--print]; R3.4 has one deployment configuration')
+        raise SystemExit('Usage: engine.py [--print]; R3.9 has one deployment configuration')
     cfg = settings()
     argv = arguments(cfg)
-    print(json.dumps({'release': 'R3.4', 'config': cfg, 'argv': argv}, ensure_ascii=False), flush=True)
+    print(json.dumps({'release': 'R3.9', 'config': cfg, 'argv': argv}, ensure_ascii=False), flush=True)
     if '--print' not in sys.argv:
         os.environ.pop('VLLM_API_KEY', None)
         os.environ.pop('R3_API_KEY', None)

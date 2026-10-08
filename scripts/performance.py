@@ -8,12 +8,12 @@ import statistics
 import time
 from cache_probe import request, NAMES
 
-if os.environ.get('R34_BENCH_DISCOVER') == '1':
+if os.environ.get('R39_BENCH_DISCOVER') == '1':
     models=request('/v1/models')['data']
-    assert len(models)==1 and models[0]['max_model_len']==262144
+    assert len(models)==1 and models[0]['id']=='DeepSeek-V4-Flash' and models[0]['max_model_len'] in (262144, 1048576)
     NAMES[:]=[models[0]['id']]
 
-out = Path('/results') / ('performance-r34-' + datetime.datetime.now().strftime('%Y%m%d-%H%M%S-%f') + '.jsonl')
+out = Path('/results') / ('performance-r39-' + datetime.datetime.now().strftime('%Y%m%d-%H%M%S-%f') + '.jsonl')
 prompt = '请详细介绍数据库事务、隔离级别、索引优化和故障恢复，逐项解释并举例，持续展开论述至少四千字。'
 image = base64.b64encode(Path('/deploy/tests/multimodal/receipt.png').read_bytes()).decode()
 for kind in ('text', 'image'):

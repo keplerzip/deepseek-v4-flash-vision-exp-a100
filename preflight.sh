@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 source "$(dirname -- "$0")/scripts/lib.sh"
-[[ $# == 0 ]] || die '用法：bash preflight.sh；R3.4 不再需要方案编号'
+[[ $# == 0 ]] || die '用法：bash preflight.sh；R3.9 不再需要方案编号'
 check_image
 check_files
 [[ $MODEL_DIR == /* && -d $MODEL_DIR ]] || die '请在 deployment.env 中设置正确的 MODEL_DIR 绝对路径'
@@ -19,8 +19,8 @@ for row in "${gpus[@]}"; do
   [[ $(printf '%s\n' 580.126.20 "$driver" | sort -V | head -1) == 580.126.20 ]] || die "驱动低于 580.126.20：$driver"
 done
 printf '%s\n' "$inventory" > "$RESULTS/gpu-inventory.csv"
-dc run --rm --pull never --network none --gpus all "${R34_MOUNTS[@]}" \
+dc run --rm --pull never --network none --gpus all "${R39_MOUNTS[@]}" \
   --mount "type=bind,src=$PACKAGE_DIR,dst=/deploy,readonly" \
   --mount "type=bind,src=$MODEL_DIR,dst=/model,readonly" \
   --entrypoint /opt/r3/bin/python "$IMAGE" /deploy/scripts/gpu_config_check.py > "$RESULTS/gpu-config.json.log"
-log 'PREFLIGHT=PASS R3.4；尚未执行模型推理'
+log 'PREFLIGHT=PASS R3.9；尚未执行模型推理'

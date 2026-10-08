@@ -277,7 +277,7 @@ def main():
         for repeat in range(args.repeat):
             for case in cases:
                 record = run_case(root, case, args.base, args.timeout)
-                record.update(repeat=repeat + 1, release="R3.4")
+                record.update(repeat=repeat + 1, release="R3.9")
                 results.append(record)
                 stream.write(json.dumps(record, ensure_ascii=False) + "\n")
                 stream.flush()
@@ -295,7 +295,7 @@ def main():
     summary = {
         "status": "PASS" if passed == len(results) else "FAIL",
         "model": 'DeepSeek-V4-Flash',
-        "release": "R3.4",
+        "release": "R3.9",
         "mode": args.mode,
         "cases_executed": len(results),
         "passed": passed,

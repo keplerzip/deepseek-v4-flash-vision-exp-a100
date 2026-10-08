@@ -8,7 +8,7 @@ import time
 import uuid
 import cache_probe as p
 
-DEST = Path('/results') / ('concurrency-r34-' + datetime.datetime.now().strftime('%Y%m%d-%H%M%S-%f') + '.jsonl')
+DEST = Path('/results') / ('concurrency-r39-' + datetime.datetime.now().strftime('%Y%m%d-%H%M%S-%f') + '.jsonl')
 PATHS = ['/v1/chat/completions', '/v1/responses', '/v1/messages']
 
 def make_case(round_id, n):
@@ -18,7 +18,8 @@ def make_case(round_id, n):
     picture = (['chart_before.png', 'chart_after.png'][n % 2]
                if round_id < 5 or n % 4 != 0 else None)
     expected = {'b_value': 65 if picture == 'chart_before.png' else 60} if picture else {'check': 73019}
-    body = p.payload_for(path, model, uuid.uuid4().hex, picture, repeats=8)
+    body = p.payload_for(path, model, uuid.uuid4().hex, picture,
+                         repeats=8 if round_id < 5 else (8,32,128,256)[n % 4])
     body['stream'] = round_id >= 5 and n % 2 == 1
     if body['stream'] and path.endswith('chat/completions'):
         body['stream_options'] = {'include_usage': True}
@@ -33,6 +34,9 @@ def run_round(round_id):
         started = time.monotonic()
         try:
             barrier.wait(timeout=60)
+            if round_id >= 5:
+                # Exercise batch growth/shrinkage with unequal prompts and arrivals.
+                time.sleep((n % 8) * 0.015)
             raw = p.request(path, body)
             actual, usage, total, cached = p.normalize(path, body, raw)
             rec.update(actual=actual, usage=usage)
@@ -57,13 +61,13 @@ def main():
                 if p.KEY:
                     line = line.replace(p.KEY, '[REDACTED]')
                 f.write(line + '\n')
-        print(json.dumps({'id': 'r34-concurrency-32', 'round': i + 1, 'status': 'FAIL' if failed else 'PASS',
+        print(json.dumps({'id': 'r39-concurrency-32', 'round': i + 1, 'status': 'FAIL' if failed else 'PASS',
                           'passed': 32 - len(failed), 'failed': len(failed),
-                          'mix': 'images-chat-json' if i < 5 else 'text-image-three-protocols-json-sse'}), flush=True)
+                          'mix': 'images-chat-json' if i < 5 else 'staggered-variable-prefix-text-image-three-protocols-json-sse'}), flush=True)
         for r in failed:
             line = json.dumps(r, ensure_ascii=False)
             print(line.replace(p.KEY, '[REDACTED]') if p.KEY else line, flush=True)
-    print(json.dumps({'C32_R34': 'FAIL' if failures else 'PASS', 'requests': 320, 'failed': failures,
+    print(json.dumps({'C32_R39': 'FAIL' if failures else 'PASS', 'requests': 320, 'failed': failures,
                       'retries': 0, 'result_file': str(DEST), 'full_window_c32_executed': False}), flush=True)
     return bool(failures)
 

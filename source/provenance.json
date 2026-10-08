@@ -1,14 +1,59 @@
 {
-  "release": "R3.4",
-  "baseline_image_id": "sha256:3a93108b2925da6d5498f2a7f7c442159b7a14fc0d6e64da3bbcc5b0a3a338e9",
-  "base_vllm": "0.1.dev43+gcf7898691.d20260830",
-  "model_weights_changed": false,
-  "native_binaries_changed": false,
-  "upstream_prs": [
-    55575,
-    54674,
-    55974
+  "release": "R3.9",
+  "date": "2026-09-29",
+  "baseline_release": "R3.8",
+  "model": "DeepSeek-V4-Flash",
+  "weights": "DeepSeek-V4-Flash-Vision-Exp",
+  "config": {
+    "decoding": "dspark",
+    "enforce_eager": false,
+    "gpu_memory_utilization": 0.92,
+    "model": "/model",
+    "served_model_name": "DeepSeek-V4-Flash",
+    "max_model_len": 1048576,
+    "max_num_seqs": 32,
+    "tensor_parallel_size": 8,
+    "max_num_batched_tokens": 4096,
+    "kv_cache_dtype": "fp8",
+    "block_size": 256,
+    "limit_mm_per_prompt": {
+      "image": 999
+    },
+    "mm_processor_cache_gb": 0,
+    "enable_prefix_caching": true,
+    "disable_chunked_mm_input": true,
+    "speculative_config": {
+      "method": "dspark",
+      "num_speculative_tokens": 6,
+      "draft_sample_method": "greedy",
+      "max_model_len": 1048576
+    },
+    "dtype": "bfloat16",
+    "mm_encoder_attn_backend": "TORCH_SDPA",
+    "prefix_caching_hash_algo": "sha256",
+    "release": "R3.9"
+  },
+  "changed_runtime_files": [
+    "vllm/entrypoints/anthropic/serving.py",
+    "vllm/entrypoints/openai/responses/protocol.py",
+    "vllm/renderers/deepseek_v4.py",
+    "vllm/tokenizers/deepseek_v4_encoding.py"
   ],
-  "patch": "r34-runtime.patch",
-  "target_gpu_validation": "PASS; operator-reported GPU checks and R34_UPGRADE=PASS on 2026-09-16; see VALIDATION.md"
+  "runtime_kernel_path_changes": false,
+  "dependency_changes": false,
+  "native_binary_changes": false,
+  "model_weights_changed": false,
+  "local_cpu_pytest_passed": 195,
+  "new_cpu_tests": 51,
+  "target_gpu_validation": "NOT_RUN on build host; install-time verify required",
+  "newapi_billing_ledger_tested": false,
+  "performance_improvement": "NOT_ESTABLISHED",
+  "all_999_images_tested": false,
+  "full_1m_times_32_tested": false,
+  "runtime_image_selection": "actual R3.8 container image ID, validated by images/runtime-images.tsv",
+  "local_installer_controller_tests": 10,
+  "target_live_image_history_checks": 22,
+  "inherited_provenance": "source/r38-provenance.json",
+  "patch": "source/r39-runtime.patch",
+  "patch_sha256": "b2722eb0e1642038406a1eb21396da28ef35e63cf46023d998702a404fc5ca8f"
 }

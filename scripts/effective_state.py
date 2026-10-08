@@ -5,7 +5,7 @@ import os
 from pathlib import Path
 import sys
 import urllib.request
-phase = 'R3.4'
+phase = 'R3.9'
 cfg = json.loads(Path('/deploy/config/service.json').read_text())
 argv = Path('/proc/1/cmdline').read_bytes().decode().rstrip('\x00').split('\x00')
 
@@ -35,9 +35,9 @@ assert '--api-key' not in argv and not os.environ.get('VLLM_API_KEY') and not os
 names = ['DeepSeek-V4-Flash']
 assert cfg['served_model_name'] == names[0] and actual['served_model_name'] == names
 assert {m['id'] for m in models} == set(names) and len(models) == 1
-assert all((m['max_model_len'] == 262144 for m in models))
+assert all((m['max_model_len'] == 1048576 for m in models))
 assert cfg['gpu_memory_utilization'] == 0.92 and actual['gpu_memory_utilization'] == ['0.92']
-for k, v in (('max_model_len', 262144), ('max_num_seqs', 32), ('tensor_parallel_size', 8)):
+for k, v in (('max_model_len', 1048576), ('max_num_seqs', 32), ('tensor_parallel_size', 8)):
     assert cfg[k] == v and actual[k] == [str(v)]
 assert cfg['enable_prefix_caching'] is True and actual['prefix_enabled']
 assert cfg['enforce_eager'] is False and (not actual['enforce_eager'])
@@ -45,11 +45,19 @@ assert json.loads(actual['limit_mm_per_prompt'][0]) == {'image': 999}
 assert json.loads(actual['speculative_config'][0]) == cfg['speculative_config']
 assert '--enable-prompt-tokens-details' in argv and '--enable-force-include-usage' in argv
 assert env['VLLM_USE_V2_MODEL_RUNNER'] == env['VLLM_USE_BREAKABLE_CUDAGRAPH'] == '1'
-assert sha == '531b7a867bf2391d25be37c49ff34172b6186bd8f4b16f295e8f9532c1633d4a'
-print('EFFECTIVE_STATE_R34=PASS MEMORY=0.92 CONTEXT=262144 CONCURRENCY=32 MULTIMODAL=ON IMAGE_LIMIT=999 USAGE_DETAILS=ON AUTH=DISABLED', flush=True)
+assert sha == json.loads(Path('/deploy/source/overlay-manifest.json').read_text())['vllm/renderers/deepseek_v4.py']
+print('EFFECTIVE_STATE_R39=PASS MEMORY=0.92 CONTEXT=1048576 CONCURRENCY=32 MULTIMODAL=ON IMAGE_LIMIT=999 USAGE_DETAILS=ON AUTH=DISABLED', flush=True)
 
 overlay = json.loads(Path('/deploy/source/overlay-manifest.json').read_text())
 for relative, expected in overlay.items():
     path = Path('/usr/local/lib/python3.12/dist-packages') / relative
     assert hashlib.sha256(path.read_bytes()).hexdigest() == expected, relative
-print('R34_RUNTIME_OVERLAY=PASS AUX_REUSE=ON STACKED_WKV=ON DSPARK_K=6', flush=True)
+assert cfg['release'] == 'R3.9'
+assert 'vllm/v1/structured_output/backend_xgrammar.py' in overlay
+for name in ('vllm/entrypoints/serve/tokenize/protocol.py',
+             'vllm/v1/worker/gpu/sample/greedy_argmax.py',
+             'vllm/v1/worker/gpu/spec_decode/dspark/speculator.py',
+             'vllm/v1/attention/backends/mla/indexer.py',
+             'vllm/v1/attention/backends/mla/sparse_swa.py'):
+    assert name in overlay, name
+print('R39_RUNTIME_OVERLAY=PASS AUX_REUSE=ON STACKED_WKV=ON DSPARK_K=6 DSPARK_BROADCAST=ON CUSTOM_TOOLS=ON XGRAMMAR_EOS_GUARD=ON TOKENIZE_TOOLS=ON SPLIT_ARGMAX=ON SPARSE_METADATA=ON', flush=True)

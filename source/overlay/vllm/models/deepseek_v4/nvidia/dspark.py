@@ -221,8 +221,8 @@ class DSparkDeepseekV4Model(nn.Module):
     ) -> torch.Tensor:
         if inputs_embeds is None:
             inputs_embeds = self.embed_input_ids(input_ids)
-        # Expand to hc_mult copies for hyper-connections ([T, H] -> [T, hc, H]).
-        hidden_states = inputs_embeds.unsqueeze(-2).repeat(1, self.hc_mult, 1)
+        # R3.5: the first decoder layer broadcasts mHC from the 2D input.
+        hidden_states = inputs_embeds
 
         residual = post_mix = res_mix = None
         for layer in self.layers:
@@ -252,6 +252,9 @@ class DSparkDeepseekV4Model(nn.Module):
             self.hc_eps,
         )
         return hidden_states
+
+    def finalize_mhc_broadcast_weights(self) -> None:
+        self.layers[0].finalize_mhc_broadcast_weight()
 
 
 def _insert_context_kv(
@@ -543,6 +546,10 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
                 loaded_params.add(name)
 
         self._finalize_moe()
+        # This frozen loader finalizes here, before generic quant packing.
+        # hc_attn_fn is an unquantized parameter, so its derived sum is final.
+        self.model.finalize_mhc_broadcast_weights()
+        logger.info("R35_DSPARK_BROADCAST_READY tp_rank=%d", get_tensor_model_parallel_rank())
         logger.info_once("DSpark draft model loaded: %d params", len(loaded_params))
         return loaded_params
 

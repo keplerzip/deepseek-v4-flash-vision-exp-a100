@@ -1,0 +1,187 @@
+--- a/vllm/entrypoints/anthropic/serving.py
++++ b/vllm/entrypoints/anthropic/serving.py
+@@ -450,7 +450,8 @@
+     ) -> None:
+         """Convert user tool_result with text and image support"""
+         tool_text = ""
+-        tool_image_urls: list[str] = []
++        tool_content: list[dict[str, Any]] = []
++        has_images = False
+         tool_reference: list[dict[str, Any]] = []
+ 
+         if isinstance(block.content, str):
+@@ -463,11 +464,13 @@
+                 item_type = item.get("type")
+                 if item_type == "text":
+                     text_parts.append(item.get("text", ""))
++                    tool_content.append({"type": "text", "text": item.get("text", "")})
+                 elif item_type == "image":
+                     source = item.get("source", {})
+                     url = cls._convert_image_source_to_url(source)
+                     if url:
+-                        tool_image_urls.append(url)
++                        tool_content.append({"type": "image_url", "image_url": {"url": url}})
++                        has_images = True
+                 elif item_type == "tool_reference":
+                     ref_name = item.get("tool_name") or item.get("name")
+                     if ref_name:
+@@ -480,20 +483,12 @@
+             {
+                 "role": "tool",
+                 "tool_call_id": block.tool_use_id or "",
+-                "content": tool_text or "",
++                # Keep images in the originating tool result, in text/image
++                # order. Moving them into a separate user turn loses their
++                # association when parallel tool results arrive out of order.
++                "content": tool_content if has_images else tool_text or "",
+             }
+         )
+-
+-        if tool_image_urls:
+-            openai_messages.append(
+-                {
+-                    "role": "user",
+-                    "content": [  # type: ignore[dict-item]
+-                        {"type": "image_url", "image_url": {"url": img}}
+-                        for img in tool_image_urls
+-                    ],
+-                }
+-            )
+ 
+         if tool_reference:
+             openai_messages.append(
+--- a/vllm/entrypoints/openai/responses/protocol.py
++++ b/vllm/entrypoints/openai/responses/protocol.py
+@@ -141,7 +141,12 @@
+     if not isinstance(value, dict):
+         return value
+ 
+-    content = value.get("content")
++    field = (
++        "output"
++        if value.get("type") in ("function_call_output", "custom_tool_call_output")
++        else "content"
++    )
++    content = value.get(field)
+     if not isinstance(content, list):
+         return value
+ 
+@@ -149,6 +154,13 @@
+     changed = False
+     for part in content:
+         new_part = part
++        if (
++            isinstance(part, dict)
++            and part.get("type") == "input_image"
++            and "detail" in part
++            and part["detail"] not in ("auto", "low", "high")
++        ):
++            raise ValueError("input_image.detail must be auto, low or high")
+         if (
+             isinstance(part, dict)
+             and part.get("type") == "input_image"
+@@ -158,7 +170,7 @@
+             changed = True
+         new_content.append(new_part)
+ 
+-    return {**value, "content": new_content} if changed else value
++    return {**value, field: new_content} if changed else value
+ 
+ 
+ class ResponsesRequest(OpenAIBaseModel):
+--- a/vllm/renderers/deepseek_v4.py
++++ b/vllm/renderers/deepseek_v4.py
+@@ -21,6 +21,54 @@
+ from .params import ChatParams
+ 
+ _TOOL_TEXT_SEPARATOR = "\n\n"
++
++
++def _order_tool_messages_before_media(
++    messages: list[ChatCompletionMessageParam],
++) -> list[ChatCompletionMessageParam]:
++    """Apply the encoder's tool-result order before collecting image data.
++
++    DeepSeek merges adjacent user/tool messages and sorts tool-result slots
++    by the preceding assistant's call order. Sorting only after media parsing
++    would reorder placeholders while leaving the image payloads in wire order.
++    Preserve user slots, group boundaries and stable ordering of unknown IDs.
++    """
++    out = list(messages)
++    call_order: dict[str, int] = {}
++    tool_slots: list[int] = []
++    group_active = False
++    group_task = None
++
++    def flush() -> None:
++        ordered = sorted(
++            (out[i] for i in tool_slots),
++            key=lambda m: call_order.get(m.get("tool_call_id", ""), 0),
++        )
++        for index, message in zip(tool_slots, ordered):
++            out[index] = message
++        tool_slots.clear()
++
++    for index, message in enumerate(messages):
++        role = message.get("role")
++        if role == "tool":
++            if not group_active:
++                group_active, group_task = True, None
++            tool_slots.append(index)
++        elif role == "user":
++            if not group_active or group_task is not None:
++                flush()
++                group_active, group_task = True, message.get("task")
++        else:
++            flush()
++            group_active, group_task = False, None
++            if role == "assistant" and message.get("tool_calls"):
++                call_order = {}
++                for position, call in enumerate(message["tool_calls"]):
++                    call_id = call.get("id") or call.get("function", {}).get("id", "")
++                    if call_id:
++                        call_order[call_id] = position
++    flush()
++    return out
+ 
+ 
+ def _join_tool_text_parts(
+@@ -74,7 +122,7 @@
+         messages: list[ChatCompletionMessageParam],
+         params: ChatParams,
+     ) -> tuple[list[ConversationMessage], DictPrompt]:
+-        messages = _join_tool_text_parts(messages)
++        messages = _join_tool_text_parts(_order_tool_messages_before_media(messages))
+         conversation, mm_data, mm_uuids = parse_chat_messages(
+             messages,
+             self.model_config,
+@@ -102,7 +150,7 @@
+         messages: list[ChatCompletionMessageParam],
+         params: ChatParams,
+     ) -> tuple[list[ConversationMessage], DictPrompt]:
+-        messages = _join_tool_text_parts(messages)
++        messages = _join_tool_text_parts(_order_tool_messages_before_media(messages))
+         conversation, mm_data, mm_uuids = await parse_chat_messages_async(
+             messages,
+             self.model_config,
+--- a/vllm/tokenizers/deepseek_v4_encoding.py
++++ b/vllm/tokenizers/deepseek_v4_encoding.py
+@@ -311,14 +311,10 @@
+                     parts.append(IMAGE_PLACEHOLDER)
+                 elif block_type == "tool_result":
+                     tool_content = block.get("content", "")
+-                    if isinstance(tool_content, list):
+-                        text_parts = []
+-                        for b in tool_content:
+-                            if b.get("type") == "text":
+-                                text_parts.append(b.get("text", ""))
+-                            else:
+-                                text_parts.append(f"[Unsupported {b.get('type')}]")
+-                        tool_content = "\n\n".join(text_parts)
++                    # Tool results can contain images (for example Codex
++                    # view_image). The renderer has already collected these
++                    # images; keep one in-place placeholder for each of them.
++                    tool_content = flatten_content_blocks(tool_content)
+                     parts.append(tool_output_template.format(content=tool_content))
+                 else:
+                     parts.append(f"[Unsupported {block_type}]")

@@ -121,13 +121,8 @@ def test_aux_layer_order_final_reconstruction_and_mtp_copy(aux_ids):
 
 
 def responses_fn():
-    return fn('entrypoints/openai/responses/utils.py','_construct_message_from_response_item',
-        ResponseFunctionToolCall=ResponseFunctionToolCall, ResponseOutputMessage=ResponseOutputMessage,
-        ResponseOutputText=ResponseOutputText, ResponseReasoningItem=ResponseReasoningItem,
-        ResponseFunctionToolCallOutputItem=ResponseFunctionToolCallOutputItem,
-        VLLMValidationError=VLLMValidationError,ChatCompletionToolMessageParam=dict,
-        ChatCompletionAssistantMessageParam=dict, ChatCompletionMessageToolCallParam=dict,
-        FunctionCallTool=dict, flat_namespace_tool_name=lambda n,v:n+'.'+v,logger=logging.getLogger(__name__))
+    from vllm.entrypoints.openai.responses.utils import _construct_message_from_response_item
+    return _construct_message_from_response_item
 
 
 @pytest.mark.parametrize('item',[{'type':'item_reference','id':'unknown'},NS(type='computer_call'),{}, {'type':'message','role':'invalid'}])
@@ -155,5 +150,5 @@ def test_fixed_contract_and_overlay_parse():
     cfg=json.loads((ROOT/'config/service.json').read_text())
     assert cfg['served_model_name']=='DeepSeek-V4-Flash' and cfg['limit_mm_per_prompt']=={'image':999}
     assert cfg['speculative_config']['num_speculative_tokens']==6 and cfg['tensor_parallel_size']==8
-    assert (cfg['max_model_len'],cfg['max_num_seqs'],cfg['gpu_memory_utilization'])==(262144,32,.92)
+    assert (cfg['max_model_len'],cfg['max_num_seqs'],cfg['gpu_memory_utilization'])==(1048576,32,.92)
     for path in OVERLAY.rglob('*.py'): ast.parse(path.read_text(),filename=str(path))

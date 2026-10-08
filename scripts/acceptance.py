@@ -164,7 +164,7 @@ def long_case(base, root, case, target):
     if not target - 64 <= actual <= target:
         raise ValueError(f"cannot construct measured prompt near {target}: {actual}")
     p = payload(n)
-    p.update(max_tokens=min(4096, 262144 - actual), temperature=0, seed=42)
+    p.update(max_tokens=min(4096, 1048576 - actual), temperature=0, seed=42)
     start = time.monotonic()
     data = request(base, "/v1/chat/completions", p)
     choice = data["choices"][0]
@@ -180,7 +180,7 @@ def long_case(base, root, case, target):
         "status": "FAIL" if errors else "PASS",
         "measured_prompt_tokens": actual,
         "max_output_tokens": p["max_tokens"],
-        "total_limit": 262144,
+        "total_limit": 1048576,
         "seconds": time.monotonic() - start,
         "expected": case["expected"],
         "actual": answer,
@@ -236,7 +236,7 @@ def main():
     assert (
         len(models) == 1
         and {m["id"] for m in models} == {MODEL}
-        and all(m["max_model_len"] == 262144 for m in models)
+        and all(m["max_model_len"] == 1048576 for m in models)
     ), models
     for rec in protocol_checks(a.base, root, cases["image_stream"]):
         save(rec)
@@ -284,7 +284,7 @@ def main():
         if failed:
             break
     if a.long:
-        for target in [32768, 65536, 131072, 258048]:
+        for target in [32768, 65536, 131072, 258048, 524288, 786432, 1044480]:
             try:
                 save(long_case(a.base, root, cases["image_stream"], target))
             except Exception as exc:
@@ -297,12 +297,12 @@ def main():
                 )
                 break
     if a.saturation:
-        # Explicit full-window C32 capacity stress; may take hours. No reduction
-        # in context/concurrency or silent retry under smaller settings.
+        # Explicit 32 x near-1M capacity stress; this is separate from the
+        # configured 32-sequence limit and is not expected to fit by default.
         start = time.monotonic()
         with concurrent.futures.ThreadPoolExecutor(max_workers=32) as pool:
             futures = [
-                pool.submit(long_case, a.base, root, cases["image_stream"], 258048)
+                pool.submit(long_case, a.base, root, cases["image_stream"], 1044480)
                 for _ in range(32)
             ]
             for i, future in enumerate(futures):
@@ -330,7 +330,7 @@ def main():
     summary = {
         "status": "FAIL" if failed else "PASS",
         "model": MODEL,
-        "release": "R3.4",
+        "release": "R3.9",
         "failed": failed,
         "long_context_executed": a.long,
         "full_window_c32_executed": a.saturation,

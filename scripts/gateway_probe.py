@@ -8,9 +8,10 @@ import uuid
 import cache_probe as p
 import client_protocol_test as c
 import multi_image_probe as m
+import codex_image_probe as images
 
 def main():
-    base = os.environ['R34_NEWAPI_URL'].rstrip('/')
+    base = os.environ['R39_NEWAPI_URL'].rstrip('/')
     if base.endswith('/v1'): base = base[:-3]
     url = urllib.parse.urlsplit(base)
     assert url.scheme in ('http','https') and url.netloc and not url.username and not url.password and not url.query and not url.fragment, 'Invalid New API root URL'
@@ -40,7 +41,9 @@ def main():
         except Exception as exc:
             failed.append(name)
             p.emit({'id':name,'status':'FAIL','error':str(exc)[:3000]})
-    p.emit({'NEWAPI_WIRE_TEST':'FAIL' if failed else 'PASS','failed':failed,'result_file':str(p.TRACE),'billing_ledger_checked':False,'scope':'Actual gateway JSON/SSE cache usage, five images and tool roundtrips. Compare these request IDs and cache counts with New API usage logs; no admin/database changes.'})
+    if images.main():
+        failed.append('codex-image-tool-history')
+    p.emit({'NEWAPI_WIRE_TEST':'FAIL' if failed else 'PASS','failed':failed,'result_file':str(p.TRACE),'billing_ledger_checked':False,'scope':'Actual gateway JSON/SSE cache usage, multi-image tool histories and tool roundtrips. Compare these request IDs and cache counts with New API usage logs; no admin/database changes.'})
     return bool(failed)
 
 if __name__=='__main__':

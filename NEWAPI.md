@@ -7,7 +7,7 @@
 | 原生路径 | 内容 | 应保留的 usage |
 |---|---|---|
 | /v1/chat/completions | Chat、图片、工具、JSON/SSE | prompt_tokens_details.cached_tokens |
-| /v1/responses | Responses、图片、function_call、JSON/SSE | input_tokens_details.cached_tokens |
+| /v1/responses | Responses、图片、function_call、顶层 custom 文本工具、JSON/SSE | input_tokens_details.cached_tokens |
 | /v1/messages | Anthropic Messages、图片、tool_use、JSON/SSE | cache_read_input_tokens / cache_creation_input_tokens |
 | /v1/messages/count_tokens | Anthropic 输入计数 | input_tokens |
 | /v1/completions | 文本补全 | 原生 completion usage |
@@ -22,9 +22,13 @@ New API 需启用相应 Responses/Messages 路由，避免多拼接 /v1。模型
 升级默认只自动验收后端。需要在当前 New API 实测时，将模型 token 写入一个权限600的文件，再执行：
 
 ```bash
-R34_NEWAPI_URL=http://127.0.0.1:3000 R34_NEWAPI_TOKEN_FILE=/absolute/path/newapi-token bash newapi_test.sh
+R39_NEWAPI_URL=http://127.0.0.1:3000 R39_NEWAPI_TOKEN_FILE=/absolute/path/newapi-token bash newapi_test.sh
 ```
 
-测试会发出真实请求并产生该网关的正常用量，校验三协议冷热缓存 JSON/SSE、多图和工具往返。结果记录返回 request id、真实 usage；与 New API 消费日志的缓存读取量核对才能判断账单链路。测试不读取或更改网关数据库/管理员配置。
+测试会发出真实请求并产生该网关的正常用量，校验三协议冷热缓存 JSON/SSE、多图和工具往返，并执行22项多图工具历史检查（包括 Codex view_image 形态）。结果记录返回 request id、真实 usage；与 New API 消费日志的缓存读取量核对才能判断账单链路。测试不读取或更改网关数据库/管理员配置。
 
-图片计数上限 999，包括当前请求提交的历史图片。5/8图顺序验收不等于999图容量认证；实际还受262144总上下文、图片大小和视觉编码资源限制。
+图片计数上限 999，包括当前请求提交的历史图片。5/8 图顺序验收不等于 999 图容量认证；实际还受 1,048,576 总上下文、图片大小和视觉编码资源限制。
+
+R3.9 保留 Messages 动态末尾 system 多轮缓存测试，要求后续 JSON 和 SSE 都实际读取至少 512 个缓存 token。此修复不伪造字段，也不修改 New API。网关版本和渠道转换可能影响最终字段，不能假定其账单链路已通过。
+
+截至 2026-09-22，New API [v1.0.0-rc.40](https://github.com/QuantumNous/new-api/releases/tag/v1.0.0-rc.40) 已包含 [#7510](https://github.com/QuantumNous/new-api/pull/7510) 的 Responses 工具结果图片转换与 [#7512](https://github.com/QuantumNous/new-api/pull/7512) 的 Claude 工具结果图片 / Responses 流事件修复。它们位于网关转换路径，原生透传不一定经过；本包不会自动更换 New API。缓存展示与计费仍需按实际网关版本核验，不能把图片转换修复当作计费已认证。

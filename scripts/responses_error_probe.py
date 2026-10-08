@@ -5,7 +5,7 @@ import urllib.request
 from cache_probe import BASE, HTTP, request, NAMES
 
 for stream in (False,True):
-    body={'model':NAMES[0],'input':[{'type':'item_reference','id':'r34_unknown_item'}],
+    body={'model':NAMES[0],'input':[{'type':'item_reference','id':'r39_unknown_item'}],
           'max_output_tokens':16,'stream':stream}
     req=urllib.request.Request(BASE+'/v1/responses',data=json.dumps(body).encode(),
                                headers={'Content-Type':'application/json'})
@@ -18,7 +18,7 @@ for stream in (False,True):
         print(json.dumps({'check':'responses-unsupported-item','stream':stream,'status':'PASS','http':400}),flush=True)
 # Empty assistant messages can appear in saved conversation histories.
 body={'model':NAMES[0],'input':[
-    {'id':'msg_r34_empty','type':'message','role':'assistant','status':'completed','content':[]},
+    {'id':'msg_r39_empty','type':'message','role':'assistant','status':'completed','content':[]},
     {'role':'user','content':'Reply with exactly the integer 34.'}],
     'max_output_tokens':256,'temperature':0,'chat_template_kwargs':{'thinking':False}}
 r=request('/v1/responses',body)

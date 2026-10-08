@@ -28,6 +28,6 @@ def compare(before, after):
 
 if __name__=='__main__':
     rows,failed=compare(summaries(Path('/report/performance-before.log')),summaries(Path('/report/performance-after.log')))
-    print(json.dumps({'R34_C1_COMPARISON':rows,'regression_threshold':.8,
+    print(json.dumps({'R39_C1_COMPARISON':rows,'regression_threshold':.8,
         'scope':'Same client/prompt and 3x1024 outputs. Not a C32 throughput benchmark or isolated kernel speedup.'}),flush=True)
     raise SystemExit(1 if failed else 0)

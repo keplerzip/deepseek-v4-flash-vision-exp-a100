@@ -32,5 +32,20 @@ upgrade/base64-r3.4.cmd
 # Encoded deployment payloads and delivery metadata are local-only.
 base64*.cmd
 base64*.sh
+base64*.cmd.sha256
+base64*.sh.sha256
 upgrade/payload.json
 upgrade/delivery.json
+
+upgrade/upgrade-r37.sh
+upgrade/base64-r3.7.cmd
+
+upgrade/upgrade-r35.sh
+upgrade/base64-r3.5.cmd
+upgrade/upgrade-r36.sh
+upgrade/base64-r3.6.cmd
+
+upgrade-r3.9.sh
+upgrade-r3.9.sh.sha256
+upgrade-r*.sh
+upgrade-r*.sh.sha256

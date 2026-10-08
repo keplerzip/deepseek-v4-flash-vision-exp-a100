@@ -12,7 +12,7 @@ import uuid
 BASE = "http://host.docker.internal:8005"
 KEY = ''
 NAMES = ["DeepSeek-V4-Flash"]
-TRACE = Path("/results") / ("cache-r34-" + datetime.datetime.now().strftime("%Y%m%d-%H%M%S-%f") + ".jsonl")
+TRACE = Path("/results") / ("cache-r39-" + datetime.datetime.now().strftime("%Y%m%d-%H%M%S-%f") + ".jsonl")
 HTTP = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 UNIT = "This line is filler for prefix reuse; it contains no answer.\n"
 
@@ -134,7 +134,7 @@ def payload_for(path, model, tag, image=None, repeats=512):
             body["chat_template_kwargs"] = {"thinking": False}
     return body
 
-def run_one(path, body, expected, phase, require_hit):
+def run_one(path, body, expected, phase, require_hit, min_cached=1):
     start = time.monotonic()
     raw = request(path, body)
     actual, usage, total, cached = normalize(path, body, raw)
@@ -142,8 +142,8 @@ def run_one(path, body, expected, phase, require_hit):
     errors = []
     if actual != expected or any(type(actual.get(k)) is not type(v) for k, v in expected.items()):
         errors.append("answer mismatch")
-    if require_hit and cached <= 0:
-        errors.append("no actual prefix-cache hit")
+    if require_hit and cached < min_cached:
+        errors.append(f"prefix-cache read below required {min_cached} tokens")
     if phase == "changed-image" and cached >= total // 2:
         errors.append("unexpected reuse after image changed near prompt start")
     reply_ids = []
@@ -158,10 +158,30 @@ def run_one(path, body, expected, phase, require_hit):
     emit(record)
     assert not errors, errors
 
+def inline_system_cache():
+    """A changing trailing system reminder must not move ahead of a long prefix."""
+    path = '/v1/messages'
+    body = payload_for(path, NAMES[0], uuid.uuid4().hex, repeats=256)
+    body['system'] = 'Follow the user. Return only the requested JSON.'
+    body['messages'].append({'role':'system','content':'Remaining audit budget: 99. Return the requested JSON.'})
+    expected = {'check':73019}
+    run_one(path,body,expected,'inline-system-cold',False)
+    body['messages'].extend([
+        {'role':'assistant','content':json.dumps(expected)},
+        {'role':'user','content':'Return the same check JSON again.'},
+        {'role':'system','content':'Remaining audit budget: 98. Return the requested JSON.'}])
+    run_one(path,body,expected,'inline-system-followup-json',True,min_cached=512)
+    body['messages'].extend([
+        {'role':'assistant','content':json.dumps(expected)},
+        {'role':'user','content':'Return the same check JSON again.'},
+        {'role':'system','content':'Remaining audit budget: 97. Return the requested JSON.'}])
+    body['stream'] = True
+    run_one(path,body,expected,'inline-system-followup-sse',True,min_cached=512)
+
 def main():
     models = request("/v1/models")["data"]
     assert len(models) == 1 and {m["id"] for m in models} == set(NAMES), models
-    assert all(m.get("max_model_len") == 262144 for m in models), models
+    assert all(m.get("max_model_len") == 1048576 for m in models), models
     failed = []
     # Every protocol gets cold JSON, warm JSON, and warm SSE.
     for path, model in [("/v1/chat/completions", NAMES[0]), ("/v1/responses", NAMES[0]), ("/v1/messages", NAMES[0])]:
@@ -186,6 +206,11 @@ def main():
             except Exception as exc:
                 failed.append(path + ":" + kind)
                 emit({"status": "FAIL", "id": failed[-1], "error": str(exc)[:1800]})
+    try:
+        inline_system_cache()
+    except Exception as exc:
+        failed.append('messages-inline-system-cache')
+        emit({'status':'FAIL','id':failed[-1],'error':str(exc)[:1800]})
     # Large prefix + tiny uncached suffix exercises sparse attention after cache hit.
     try:
         path = "/v1/chat/completions"

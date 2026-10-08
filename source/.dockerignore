@@ -2,3 +2,5 @@
 !Dockerfile
 !overlay/
 !overlay/**
+overlay/**/__pycache__/
+overlay/**/*.pyc

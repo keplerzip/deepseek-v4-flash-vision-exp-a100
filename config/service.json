@@ -4,7 +4,7 @@
   "gpu_memory_utilization": 0.92,
   "model": "/model",
   "served_model_name": "DeepSeek-V4-Flash",
-  "max_model_len": 262144,
+  "max_model_len": 1048576,
   "max_num_seqs": 32,
   "tensor_parallel_size": 8,
   "max_num_batched_tokens": 4096,
@@ -20,10 +20,10 @@
     "method": "dspark",
     "num_speculative_tokens": 6,
     "draft_sample_method": "greedy",
-    "max_model_len": 262144
+    "max_model_len": 1048576
   },
   "dtype": "bfloat16",
   "mm_encoder_attn_backend": "TORCH_SDPA",
   "prefix_caching_hash_algo": "sha256",
-  "release": "R3.4"
+  "release": "R3.9"
 }

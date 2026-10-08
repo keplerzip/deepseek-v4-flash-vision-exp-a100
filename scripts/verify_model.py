@@ -23,8 +23,8 @@ def verify(root, full_hash=False):
     }.items():
         if cfg.get(key) != value:
             raise ValueError(f"{key}: expected {value!r}, got {cfg.get(key)!r}")
-    if cfg.get("max_position_embeddings", 0) < 262144:
-        raise ValueError("模型上下文不足 256K")
+    if cfg.get("max_position_embeddings", 0) < 1048576:
+        raise ValueError("模型上下文不足 1M")
     idx = json.loads((root / "model.safetensors.index.json").read_text())["weight_map"]
     # The source index is authoritative for this pinned model, but does not load weights.
     ref = (
@@ -34,7 +34,7 @@ def verify(root, full_hash=False):
     expected = json.loads(ref.read_text())["weight_map"]
     if idx != expected:
         raise ValueError(
-            "权重索引与 R3.4 固定 Vision-Exp 版本不一致；请保留诊断结果核对，勿替换为文本模型"
+            "权重索引与 R3.9 固定 Vision-Exp 版本不一致；请保留诊断结果核对，勿替换为文本模型"
         )
     shards = sorted(set(idx.values()))
     total = 0

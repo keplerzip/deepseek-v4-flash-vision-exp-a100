@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+set -euo pipefail
+umask 077
+for required in docker python3 flock; do
+  command -v "$required" >/dev/null || { printf 'ERROR: missing %s\n' "$required" >&2; exit 1; }
+done
+if docker info >/dev/null 2>&1; then DC=(docker)
+elif sudo -n docker info >/dev/null 2>&1; then DC=(sudo -n docker)
+else printf '%s\n' 'ERROR: Run sudo docker info once, then run this script again.' >&2; exit 1; fi
+dc(){ "${DC[@]}" "$@"; }
+previous=dsv4-flash-r38
+[[ $(dc inspect --format '{{index .Config.Labels "com.deepseek.owner"}}' "$previous") == deepseek-v4-flash-r3.8-20260923 ]] || { printf '%s\n' 'ERROR: previous R3.8 container ownership mismatch'; exit 1; }
+previous_id=$(dc inspect --format '{{.Id}}' "$previous")
+previous_dir=$(dc inspect --format '{{range .Mounts}}{{if eq .Destination "/deploy"}}{{.Source}}{{end}}{{end}}' "$previous")
+[[ $previous_dir == /* && -d $previous_dir ]] || { printf '%s\n' 'ERROR: previous deployment mount not found'; exit 1; }
+parent=$(dirname -- "$previous_dir")
+candidate=${R39_INSTALL_DIR:-$parent/r3.9-1m-c32-20260929}
+exec 7>"$parent/.r39-upgrade.lock"
+flock -n 7 || { printf '%s\n' 'ERROR: another R3.9 upgrade is running'; exit 1; }
+printf 'R39_UPGRADE=PREPARING SOURCE=%s CANDIDATE=%s\n' "$previous_dir" "$candidate"
+python3 - "$previous_dir" "$candidate" <<'PY_R39_PAYLOAD'
+import base64, hashlib, json, sys, zlib
+raw = zlib.decompress(base64.b64decode('__R39_PAYLOAD__', validate=True))
+if hashlib.sha256(raw).hexdigest() != '__R39_PAYLOAD_SHA__':
+    raise SystemExit('R3.9 embedded payload checksum mismatch')
+payload = json.loads(raw)
+entry = payload['files']['upgrade/prepare.py']
+code = base64.b64decode(entry['data'], validate=True)
+if hashlib.sha256(code).hexdigest() != entry['sha256']:
+    raise SystemExit('R3.9 preparation code checksum mismatch')
+namespace = {}
+exec(compile(code, 'R3.9/prepare.py', 'exec'), namespace)
+namespace['prepare'](sys.argv[1], sys.argv[2], payload)
+PY_R39_PAYLOAD
+[[ $(dc inspect --format '{{.Id}}' "$previous") == "$previous_id" ]] || { printf '%s\n' 'ERROR: previous container changed during preparation'; exit 1; }
+exec bash "$candidate/install.sh"
